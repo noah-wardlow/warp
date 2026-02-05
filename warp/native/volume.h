@@ -25,14 +25,14 @@
 #define PNANOVDB_MEMCPY_CUSTOM
 #define pnanovdb_memcpy memcpy
 
-#if defined(WP_NO_CRT) && !defined(__CUDACC__)
+#if defined(WP_NO_CRT) && !defined(__CUDACC__) && !defined(__HIPCC__)
 // PNanoVDB will try to include <stdint.h> unless __CUDACC_RTC__ is defined
 #define __CUDACC_RTC__
 #endif
 
 #include "nanovdb/PNanoVDB.h"
 
-#if defined(WP_NO_CRT) && !defined(__CUDACC__)
+#if defined(WP_NO_CRT) && !defined(__CUDACC__) && !defined(__HIPCC__)
 #undef __CUDACC_RTC__
 #endif
 

@@ -27,32 +27,40 @@
 #pragma clang diagnostic ignored "-Wc++17-extensions"
 #endif  // __clang__
 
-// Check if the CUDA toolkit is available
-#if WP_ENABLE_CUDA || defined(__CUDACC_RTC__)
+// Check if the CUDA/HIP toolkit is available
+#if WP_ENABLE_CUDA || defined(__CUDACC_RTC__) || defined(__HIPCC__)
 
-// If NVRTC is being used, do not include extra headers (NVRTC has built-in float4)
-#ifdef __CUDACC_RTC__
-// NVRTC: Use built-in float4 (no need for extra definitions)
+// RTC compilers have built-in float4 and type traits - including runtime headers
+// causes redefinition errors with hiprtc_runtime.h / nvrtc built-ins
+#if defined(__CUDACC_RTC__) || defined(__HIPCC_RTC__)
+// RTC: Use built-in float4 (no need for extra definitions)
 #else
-// NVCC: Include vector_types.h to get float4
+// NVCC/HIPCC: Include runtime headers to get float4
+#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
+#include "hip_util.h"
+#else
 #include <cuda_runtime.h>
+#endif
 #endif
 
 #else
-// If CUDA is not available (e.g., macOS build), manually define float4
+// If CUDA is not available (e.g., macOS build), manually define float4.
+// Avoid redefining when HIP device compile already provides float4.
+#if !defined(__HIP_DEVICE_COMPILE__)
 struct alignas(16) float4 {
     float x, y, z, w;
 };
 #endif
-
-#if defined(__CUDA_ARCH__)
-#define WP_TILE_SYNC __syncthreads
-#else
-#define WP_TILE_SYNC void
 #endif
 
-#if defined(__CUDA_ARCH__) && !defined(__INTELLISENSE__)
-#if defined(__CUDACC_RTC__) || (defined(__clang__) && defined(__CUDA__))
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
+#define WP_TILE_SYNC() __syncthreads()
+#else
+#define WP_TILE_SYNC() ((void)0)
+#endif
+
+#if (defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)) && !defined(__INTELLISENSE__)
+#if defined(__CUDACC_RTC__) || (defined(__clang__) && defined(__CUDA__)) || defined(__HIP_DEVICE_COMPILE__)
 #define WP_PRAGMA_UNROLL _Pragma("unroll")
 #define WP_PRAGMA_NO_UNROLL _Pragma("unroll 1")
 #else
@@ -70,11 +78,11 @@ struct alignas(16) float4 {
 #define WP_USE_ASYNC_PIPELINE 0
 #define WP_USE_REGISTER_GEMM 0
 
-#if defined(__CUDACC_RTC__)
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 #define WP_TILE_THREAD_IDX threadIdx.x
 #else
 #define WP_TILE_THREAD_IDX 0
-#endif  //
+#endif
 
 
 /* Tile Expressions
@@ -190,6 +198,46 @@ for asynchronous global to shared loads.
 */
 
 namespace wp {
+
+#if defined(__HIP_DEVICE_COMPILE__)
+using tile_mask_t = unsigned long long;
+constexpr tile_mask_t tile_full_mask = 0xffffffffull;
+#else
+using tile_mask_t = unsigned int;
+constexpr tile_mask_t tile_full_mask = 0xffffffffu;
+#endif
+
+inline CUDA_CALLABLE int tile_popc(tile_mask_t mask)
+{
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
+#if defined(__HIP_DEVICE_COMPILE__)
+    return __popcll(mask);
+#else
+    return __popc(mask);
+#endif
+#else
+    if constexpr (sizeof(tile_mask_t) == 8) {
+        return __builtin_popcountll(mask);
+    }
+    return __builtin_popcount(static_cast<unsigned int>(mask));
+#endif
+}
+
+inline CUDA_CALLABLE int tile_ffs(tile_mask_t mask)
+{
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
+#if defined(__HIP_DEVICE_COMPILE__)
+    return __ffsll(mask);
+#else
+    return __ffs(mask);
+#endif
+#else
+    if constexpr (sizeof(tile_mask_t) == 8) {
+        return __builtin_ffsll(mask);
+    }
+    return __builtin_ffs(static_cast<unsigned int>(mask));
+#endif
+}
 
 // Primary template
 template <typename T, typename U> struct is_same {
@@ -677,7 +725,7 @@ template <typename T, typename L> struct tile_register_t {
         const int thread = Layout::thread_from_linear(linear);
         const int reg = Layout::register_from_linear(linear);
 
-#if defined(__CUDA_ARCH__)
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
         __shared__ Type scratch;
 #else
         Type scratch;
@@ -874,7 +922,7 @@ private:
     // current use across dynamic function calls
     static inline CUDA_CALLABLE unsigned int* get_smem_base()
     {
-#if defined(__CUDA_ARCH__)
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
         __shared__ unsigned int smem_base[WP_TILE_BLOCK_DIM];
         return smem_base;
 #elif defined(WP_ENABLE_TILES_IN_STACK_MEMORY)
@@ -887,7 +935,7 @@ private:
 
     static inline CUDA_CALLABLE char* get_dynamic_smem_base()
     {
-#if defined(__CUDA_ARCH__)
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
         extern __shared__ char dynamic_smem_base[];
         return dynamic_smem_base;
 #elif defined(WP_ENABLE_TILES_IN_STACK_MEMORY)
@@ -1475,7 +1523,7 @@ template <typename T, typename L, bool Owner_ = true> struct tile_shared_t {
     template <typename Global> inline CUDA_CALLABLE void copy_to_global(const Global& dest)
     {
 
-#if defined(__CUDA_ARCH__)
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
         // vectorized loads for specific input/output shapes
         if constexpr (Layout::Shape::N == 2) {
             constexpr int lastdim = Layout::Shape::N - 1;
@@ -1513,7 +1561,7 @@ template <typename T, typename L, bool Owner_ = true> struct tile_shared_t {
             }
         }
 
-#endif  // defined(__CUDA_ARCH__)
+#endif  // defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 
         // scalar bounds checked path
         WP_PRAGMA_UNROLL
@@ -1554,7 +1602,7 @@ template <typename T, typename L, bool Owner_ = true> struct tile_shared_t {
         if (initialized)
             WP_TILE_SYNC();
 
-#if defined(__CUDA_ARCH__)
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 
         // vectorized loads for specific input/output shapes
         if constexpr (Layout::Shape::N == 2) {
@@ -1603,7 +1651,7 @@ template <typename T, typename L, bool Owner_ = true> struct tile_shared_t {
             }
         }
 
-#endif  // defined(__CUDA_ARCH__)
+#endif  // defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 
         // scalar bounds checked path
         WP_PRAGMA_UNROLL
@@ -1718,7 +1766,7 @@ template <typename T, typename L> CUDA_CALLABLE void tile_register_t<T, L>::prin
 {
     // create a temporary shared tile so that
     // we can print it deterministically
-#if defined(__CUDA_ARCH__)
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     __shared__ T smem[L::Size];
 #else
     T smem[L::Size];
@@ -4615,7 +4663,7 @@ template <
     typename TileC,
     typename Alpha,
     typename Beta>
-TileC& tile_matmul(
+inline CUDA_CALLABLE TileC& tile_matmul(
     Fwd fun_forward, AdjA fun_backward_A, AdjB fun_backward_B, TileA& A, TileB& B, TileC& C, Alpha& alpha, Beta& beta
 )
 {
@@ -4659,7 +4707,7 @@ template <
     typename TileC,
     typename Alpha,
     typename Beta>
-TileC& tile_matmul_acc(
+inline CUDA_CALLABLE TileC& tile_matmul_acc(
     Fwd fun_forward, AdjA fun_backward_A, AdjB fun_backward_B, TileA& A, TileB& B, TileC& C, Alpha& alpha, Beta& beta
 )
 {
@@ -4706,7 +4754,7 @@ template <
     typename Beta,
     typename AdjAlpha,
     typename AdjBeta>
-void adj_tile_matmul_acc(
+inline CUDA_CALLABLE void adj_tile_matmul_acc(
     Fwd fun_forward,
     AdjA fun_backward_A,
     AdjB fun_backward_B,
@@ -4772,7 +4820,7 @@ template <
     typename Beta,
     typename AdjAlpha,
     typename AdjBeta>
-void adj_tile_matmul(
+inline CUDA_CALLABLE void adj_tile_matmul(
     Fwd fun_forward,
     AdjA fun_backward_A,
     AdjB fun_backward_B,

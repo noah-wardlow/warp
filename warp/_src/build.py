@@ -76,10 +76,19 @@ def build_cuda(
         )
         arr_link_input_types = (ctypes.c_int * num_link)(*link_input_types)
         kernel_cache_dir_bytes = warp.config.kernel_cache_dir.encode("utf-8")
+        if arch is None:
+            arch_bytes = None
+        elif isinstance(arch, int):
+            arch_bytes = f"sm_{arch}".encode("utf-8")
+        elif isinstance(arch, str):
+            arch_bytes = arch.encode("utf-8")
+        else:
+            raise TypeError(f"Unsupported arch type: {type(arch)}")
+
         err = warp._src.context.runtime.core.wp_cuda_compile_program(
             src,
             program_name_bytes,
-            arch,
+            arch_bytes,
             inc_path,
             0,
             None,
@@ -535,7 +544,7 @@ def build_lto_solver(
                 max_smem_bytes = 232448
                 max_smem_is_estimate = True
                 for d in warp.get_cuda_devices():
-                    if d.arch == arch:
+                    if (isinstance(arch, str) and d.arch_str == arch) or (isinstance(arch, int) and d.arch == arch):
                         # We can directly query the max shared memory for this device
                         queried_bytes = warp._src.context.runtime.core.wp_cuda_get_max_shared_memory(d.context)
                         if queried_bytes > 0:

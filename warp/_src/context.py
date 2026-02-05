@@ -2596,14 +2596,14 @@ class Module:
 
         return module_name_short
 
-    def _get_compile_arch(self, device: Device | None = None) -> int | None:
+    def _get_compile_arch(self, device: Device | None = None) -> int | str | None:
         if device is None:
             device = runtime.get_device()
 
         return device.get_cuda_compile_arch()
 
     def _get_compile_output_name(
-        self, device: Device | None, output_arch: int | None = None, use_ptx: bool | None = None
+        self, device: Device | None, output_arch: int | str | None = None, use_ptx: bool | None = None
     ) -> str:
         """Get the filename to use for the compiled module binary.
 
@@ -2632,12 +2632,22 @@ class Module:
                 use_ptx = self._use_ptx(device)
             else:
                 init()
-                use_ptx = final_arch not in runtime.nvrtc_supported_archs
+                use_ptx = isinstance(final_arch, int) and final_arch not in runtime.nvrtc_supported_archs
+
+        if isinstance(final_arch, str):
+            if final_arch.startswith("sm_"):
+                arch_label = f"sm{final_arch[3:]}"
+            elif final_arch.startswith("compute_"):
+                arch_label = f"compute{final_arch[8:]}"
+            else:
+                arch_label = final_arch
+        else:
+            arch_label = f"sm{final_arch}"
 
         if use_ptx:
-            output_name = f"{module_name_short}.sm{final_arch}.ptx"
+            output_name = f"{module_name_short}.{arch_label}.ptx"
         else:
-            output_name = f"{module_name_short}.sm{final_arch}.cubin"
+            output_name = f"{module_name_short}.{arch_label}.cubin"
 
         return output_name
 
@@ -2653,7 +2663,7 @@ class Module:
         device: Device | None = None,
         output_dir: str | os.PathLike | None = None,
         output_name: str | None = None,
-        output_arch: int | None = None,
+        output_arch: int | str | None = None,
         use_ptx: bool | None = None,
     ) -> None:
         """Compile this module for a specific device.
@@ -2706,7 +2716,14 @@ class Module:
         if opt is None:
             opt = 3  # default to full optimization (ignored for debug builds)
 
-        if opt != 3 and output_arch and runtime.toolkit_version is not None and runtime.toolkit_version < (12, 9):
+        is_hip = device is not None and device.is_hip
+        if (
+            opt != 3
+            and output_arch
+            and runtime.toolkit_version is not None
+            and runtime.toolkit_version < (12, 9)
+            and not is_hip
+        ):
             warp._src.utils.warn(
                 "Optimization level other than 3 has no effect on CUDA versions prior to 12.9.", once=True
             )
@@ -2844,7 +2861,7 @@ class Module:
         device,
         block_dim: int | None = None,
         binary_path: os.PathLike | None = None,
-        output_arch: int | None = None,
+        output_arch: int | str | None = None,
         meta_path: os.PathLike | None = None,
     ) -> ModuleExec | None:
         device = runtime.get_device(device)
@@ -3379,8 +3396,9 @@ class Device:
         ordinal (int): A Warp-specific label for the device. ``-1`` for CPU devices.
         name (str): A label for the device. By default, CPU devices will be named according to the processor name,
             or ``"CPU"`` if the processor name cannot be determined.
-        arch (int): The compute capability version number calculated as ``10 * major + minor``.
-            ``0`` for CPU devices.
+        arch (int): The CUDA compute capability version number calculated as ``10 * major + minor``.
+            ``0`` for CPU devices or non-CUDA architectures.
+        arch_str (str): The architecture string reported by the runtime (e.g., ``"sm_86"`` or ``"gfx942"``).
         sm_count (int): The number of streaming multiprocessors on the CUDA device.
             ``0`` for CPU devices.
         is_uva (bool): Indicates whether the device supports unified addressing.
@@ -3428,6 +3446,7 @@ class Device:
             # CPU device
             self.name = platform.processor() or "CPU"
             self.arch = 0
+            self.arch_str = ""
             self.sm_count = 0
             self.is_uva = False
             self.is_mempool_supported = False
@@ -3447,7 +3466,16 @@ class Device:
         elif ordinal >= 0 and ordinal < runtime.core.wp_cuda_device_get_count():
             # CUDA device
             self.name = runtime.core.wp_cuda_device_get_name(ordinal).decode()
-            self.arch = runtime.core.wp_cuda_device_get_arch(ordinal)
+            arch_bytes = runtime.core.wp_cuda_device_get_arch(ordinal)
+            arch_str = arch_bytes.decode() if arch_bytes else ""
+            self.arch_str = arch_str
+            if arch_str.startswith("sm_") or arch_str.startswith("compute_"):
+                try:
+                    self.arch = int(arch_str.split("_", 1)[1])
+                except (ValueError, IndexError):
+                    self.arch = 0
+            else:
+                self.arch = 0
             self.sm_count = runtime.core.wp_cuda_device_get_sm_count(ordinal)
             self.is_uva = runtime.core.wp_cuda_device_is_uva(ordinal) > 0
             self.is_mempool_supported = runtime.core.wp_cuda_device_is_mempool_supported(ordinal) > 0
@@ -3487,8 +3515,11 @@ class Device:
             else:
                 self.current_allocator = self.default_allocator
 
-            # check whether our NVRTC can generate CUBINs for this architecture
-            self.is_cubin_supported = self.arch in runtime.nvrtc_supported_archs
+            # check whether our NVRTC/HIPRTC can generate device code for this architecture
+            if self.is_hip:
+                self.is_cubin_supported = True
+            else:
+                self.is_cubin_supported = self.arch in runtime.nvrtc_supported_archs
 
             # initialize streams unless context acquisition is postponed
             if self._context is not None:
@@ -3535,6 +3566,11 @@ class Device:
     def is_cuda(self) -> bool:
         """A boolean indicating whether the device is a CUDA device."""
         return self.ordinal >= 0
+
+    @property
+    def is_hip(self) -> bool:
+        """A boolean indicating whether the device is a HIP device."""
+        return self.is_cuda and self.arch_str.startswith("gfx")
 
     @property
     def is_capturing(self) -> bool:
@@ -3723,6 +3759,10 @@ class Device:
             # CPU devices don't use CUDA compilation
             return None
 
+        if self.is_hip:
+            # HIP does not support PTX output
+            return "cubin"
+
         if not self.is_cubin_supported:
             return "ptx"
 
@@ -3748,8 +3788,8 @@ class Device:
             else "cubin"
         )
 
-    def get_cuda_compile_arch(self) -> int | None:
-        """Get the CUDA architecture to use when compiling code for this device.
+    def get_cuda_compile_arch(self) -> int | str | None:
+        """Get the CUDA/HIP architecture to use when compiling code for this device.
 
         This method is intended for internal use by Warp's compilation system.
         External users should not need to call this method directly.
@@ -3763,11 +3803,14 @@ class Device:
         For CUBIN output format, uses the device's exact architecture.
 
         Returns:
-            The compute capability version (e.g., 75 for ``sm_75``) to use for compilation,
-            or ``None`` for CPU devices which don't use CUDA compilation.
+            The compute capability version (e.g., 75 for ``sm_75``) to use for CUDA compilation,
+            the architecture string for HIP (e.g., ``"gfx942"``), or ``None`` for CPU devices.
         """
         if self.is_cpu:
             return None
+
+        if self.is_hip:
+            return self.arch_str
 
         if self.get_cuda_output_format() == "ptx":
             # use the default PTX arch if the device supports it
@@ -4481,7 +4524,7 @@ class Runtime:
             self.core.wp_cuda_device_get_name.argtypes = [ctypes.c_int]
             self.core.wp_cuda_device_get_name.restype = ctypes.c_char_p
             self.core.wp_cuda_device_get_arch.argtypes = [ctypes.c_int]
-            self.core.wp_cuda_device_get_arch.restype = ctypes.c_int
+            self.core.wp_cuda_device_get_arch.restype = ctypes.c_char_p
             self.core.wp_cuda_device_get_sm_count.argtypes = [ctypes.c_int]
             self.core.wp_cuda_device_get_sm_count.restype = ctypes.c_int
             self.core.wp_cuda_device_is_uva.argtypes = [ctypes.c_int]
@@ -4734,7 +4777,7 @@ class Runtime:
             self.core.wp_cuda_compile_program.argtypes = [
                 ctypes.c_char_p,  # cuda_src
                 ctypes.c_char_p,  # program name
-                ctypes.c_int,  # arch
+                ctypes.c_char_p,  # arch
                 ctypes.c_char_p,  # include_dir
                 ctypes.c_int,  # num_cuda_include_dirs
                 ctypes.POINTER(ctypes.c_char_p),  # cuda include dirs
@@ -4911,22 +4954,27 @@ class Runtime:
         self.is_cuda_compatibility_enabled = bool(self.core.wp_is_cuda_compatibility_enabled())
 
         self.toolkit_version = None  # CTK version used to build the core lib
+        self.toolkit_version_raw = None  # raw toolkit version from the runtime
         self.driver_version = None  # installed driver version
+        self.driver_version_raw = None  # raw driver version from the runtime
         self.min_driver_version = None  # minimum required driver version
 
         self.cuda_devices = []
         self.cuda_primary_devices = []
+        self.is_hip = False
 
         cuda_device_count = 0
 
         if self.is_cuda_enabled:
             # get CUDA Toolkit and driver versions
             toolkit_version = self.core.wp_cuda_toolkit_version()
+            self.toolkit_version_raw = toolkit_version
             self.toolkit_version = (toolkit_version // 1000, (toolkit_version % 1000) // 10)
 
             if self.core.wp_cuda_driver_is_initialized():
                 # save versions as tuples, e.g., (12, 4)
                 driver_version = self.core.wp_cuda_driver_version()
+                self.driver_version_raw = driver_version
                 self.driver_version = (driver_version // 1000, (driver_version % 1000) // 10)
             else:
                 self.driver_version = None
@@ -4982,24 +5030,30 @@ class Runtime:
             else:
                 self.set_default_device("cuda:0")
 
-            # the minimum PTX architecture that supports all of Warp's features
-            self.default_ptx_arch = 75
+            self.is_hip = any(d.is_hip for d in self.cuda_devices)
 
-            # Update the default PTX architecture based on devices present in the system.
-            # Use the lowest architecture among devices that meet the minimum architecture requirement.
-            # Devices below the required minimum will use the highest architecture they support.
-            try:
-                self.default_ptx_arch = min(
-                    d.arch
-                    for d in self.cuda_devices
-                    if d.arch >= self.default_ptx_arch and d.arch in self.nvrtc_supported_archs
-                )
-            except ValueError:
-                pass  # no eligible NVRTC-supported arch ≥ default, retain existing
+            if self.is_hip:
+                self.default_ptx_arch = None
+            else:
+                # the minimum PTX architecture that supports all of Warp's features
+                self.default_ptx_arch = 75
+
+                # Update the default PTX architecture based on devices present in the system.
+                # Use the lowest architecture among devices that meet the minimum architecture requirement.
+                # Devices below the required minimum will use the highest architecture they support.
+                try:
+                    self.default_ptx_arch = min(
+                        d.arch
+                        for d in self.cuda_devices
+                        if d.arch >= self.default_ptx_arch and d.arch in self.nvrtc_supported_archs
+                    )
+                except ValueError:
+                    pass  # no eligible NVRTC-supported arch ≥ default, retain existing
         else:
             # CUDA not available
             self.set_default_device("cpu")
             self.default_ptx_arch = None
+            self.is_hip = False
 
         # initialize kernel cache
         warp._src.build.init_kernel_cache(warp.config.kernel_cache_dir)
@@ -5018,10 +5072,18 @@ class Runtime:
                 greeting.append(f"   Git commit: {warp.config._git_commit_hash}")
 
             if cuda_device_count > 0:
-                # print CUDA version info
-                greeting.append(
-                    f"   CUDA Toolkit {self.toolkit_version[0]}.{self.toolkit_version[1]}, Driver {self.driver_version[0]}.{self.driver_version[1]}"
-                )
+                # print CUDA/ROCm version info
+                if self.is_hip:
+                    toolkit_str = self._format_rocm_version(self.toolkit_version_raw)
+                    driver_str = self._format_rocm_version(self.driver_version_raw)
+                    if driver_str != "unknown":
+                        greeting.append(f"   ROCm {toolkit_str}, HIP driver {driver_str}")
+                    else:
+                        greeting.append(f"   ROCm {toolkit_str}")
+                else:
+                    greeting.append(
+                        f"   CUDA Toolkit {self.toolkit_version[0]}.{self.toolkit_version[1]}, Driver {self.driver_version[0]}.{self.driver_version[1]}"
+                    )
             else:
                 # briefly explain lack of CUDA devices
                 if not self.is_cuda_enabled:
@@ -5046,7 +5108,7 @@ class Runtime:
                 alias_str = f'"{cuda_device.alias}"'
                 if cuda_device.is_primary:
                     name_str = f'"{cuda_device.name}"'
-                    arch_str = f"sm_{cuda_device.arch}"
+                    arch_str = cuda_device.arch_str or f"sm_{cuda_device.arch}"
                     mem_str = f"{cuda_device.total_memory / 1024 / 1024 / 1024:.0f} GiB"
                     if cuda_device.is_mempool_supported:
                         if cuda_device.is_mempool_enabled:
@@ -5137,6 +5199,21 @@ class Runtime:
 
     def get_error_string(self):
         return self.core.wp_get_error_string().decode("utf-8")
+
+    @staticmethod
+    def _format_rocm_version(version: int | None) -> str:
+        if not version:
+            return "unknown"
+        if version >= 10000000:
+            major = version // 10000000
+            minor = (version // 100000) % 100
+            patch = version % 100000
+            if patch and patch < 1000:
+                return f"{major}.{minor}.{patch}"
+            return f"{major}.{minor}"
+        major = version // 1000
+        minor = (version % 1000) // 10
+        return f"{major}.{minor}"
 
     def get_warp_version(self) -> str:
         """Get the version of the Warp core library.
@@ -5370,23 +5447,25 @@ def is_cuda_driver_initialized() -> bool:
     return runtime.core.wp_cuda_driver_is_initialized()
 
 
-def get_cuda_supported_archs() -> list[int]:
-    """Return a sorted list of CUDA compute architectures that can be used as compilation targets.
+def get_cuda_supported_archs() -> list[int | str]:
+    """Return a sorted list of CUDA/HIP architectures that can be used as compilation targets.
 
-    The returned architectures represent the compute capabilities that Warp's NVRTC compiler
-    can generate code for. These values correspond to CUDA compute capability versions
-    (e.g., 75 for ``sm_75``, 80 for ``sm_80``, 90 for ``sm_90``).
+    For CUDA, this returns compute capability integers (e.g., 75 for ``sm_75``).
+    For HIP, this returns architecture strings (e.g., ``"gfx942"``) for available devices.
 
     Returns:
-        A sorted list of architecture values from lowest to highest, or an empty list
-        if CUDA is not available or no architectures are supported.
+        A sorted list of architectures, or an empty list if CUDA/HIP is not available.
     """
     init()
 
-    if runtime.is_cuda_enabled:
-        return sorted(runtime.nvrtc_supported_archs)
-    else:
+    if not runtime.is_cuda_enabled:
         return []
+
+    if any(d.is_hip for d in runtime.cuda_devices):
+        archs = [d.arch_str for d in runtime.cuda_devices if d.arch_str]
+        return sorted(set(archs))
+
+    return sorted(runtime.nvrtc_supported_archs)
 
 
 def get_devices() -> list[Device]:
@@ -7461,7 +7540,7 @@ def _resolve_module(module: Module | types.ModuleType | str) -> Module:
 def compile_aot_module(
     module: Module | types.ModuleType | str,
     device: Device | str | list[Device] | list[str] | None = None,
-    arch: int | Iterable[int] | None = None,
+    arch: int | str | Iterable[int | str] | None = None,
     module_dir: str | os.PathLike | None = None,
     use_ptx: bool | None = None,
     strip_hash: bool | None = None,
@@ -7578,7 +7657,7 @@ def compile_aot_module(
 def load_aot_module(
     module: Module | types.ModuleType | str,
     device: Device | str | list[Device] | list[str] | None = None,
-    arch: int | None = None,
+    arch: int | str | None = None,
     module_dir: str | os.PathLike | None = None,
     use_ptx: bool | None = None,
     strip_hash: bool = False,
@@ -7649,7 +7728,7 @@ def load_aot_module(
         # Determine candidate binaries to try
         tried_paths = []
         binary_path = None
-        if d.is_cuda and use_ptx is None:
+        if d.is_cuda and use_ptx is None and not d.is_hip:
             candidate_flags = (True, False)  # try PTX first, then CUBIN
         else:
             candidate_flags = (use_ptx,)

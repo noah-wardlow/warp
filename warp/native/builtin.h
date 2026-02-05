@@ -23,11 +23,16 @@
 
 #include "crt.h"
 
+#if defined(__HIP_DEVICE_COMPILE__)
+#include <hip/hip_runtime.h>
+#include <hip/hip_fp16.h>
+#endif
+
 #ifdef _WIN32
 #define __restrict__ __restrict
 #endif
 
-#if !defined(__CUDACC__)
+#if !defined(__CUDACC__) && !defined(__HIPCC__)
 #define CUDA_CALLABLE
 #define CUDA_CALLABLE_DEVICE
 #else
@@ -75,6 +80,8 @@
 
 #if defined(__CUDACC__) && !defined(_MSC_VER)
 __device__ inline void __debugbreak() { __brkpt(); }
+#elif defined(__HIPCC__) && !defined(_MSC_VER)
+__device__ inline void __debugbreak() { __builtin_trap(); }
 #endif
 
 #if defined(__clang__) && defined(__CUDA__)
@@ -196,6 +203,23 @@ CUDA_CALLABLE inline float half_to_float(half x)
     float val;
     asm("{  cvt.f32.f16 %0, %1;}\n" : "=f"(val) : "h"(x.u));
     return val;
+}
+
+#elif defined(__HIP_DEVICE_COMPILE__)
+
+// Use HIP intrinsics for half-precision conversion on AMD GPUs
+// __float2half_rn() uses round-to-nearest-even (matches CUDA's cvt.rn.f16.f32)
+// __half2float() matches CUDA's cvt.f32.f16
+CUDA_CALLABLE inline half float_to_half(float x)
+{
+    half h;
+    h.u = __half_as_ushort(__float2half_rn(x));
+    return h;
+}
+
+CUDA_CALLABLE inline float half_to_float(half h)
+{
+    return __half2float(__ushort_as_half(h.u));
 }
 
 #elif defined(__clang__)
@@ -1308,7 +1332,7 @@ inline CUDA_CALLABLE launch_coord_t launch_coord(size_t linear, const launch_bou
 
 inline CUDA_CALLABLE int block_dim()
 {
-#if defined(__CUDA_ARCH__)
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     return blockDim.x;
 #else
     return 1;
@@ -1319,7 +1343,7 @@ inline CUDA_CALLABLE int tid(size_t index, const launch_bounds_t& bounds)
 {
     // For the 1-D tid() we need to warn the user if we're about to provide a truncated index
     // Only do this in _DEBUG when called from device to avoid excessive register allocation
-#if defined(_DEBUG) || !defined(__CUDA_ARCH__)
+#if defined(_DEBUG) || (!defined(__CUDA_ARCH__) && !defined(__HIP_DEVICE_COMPILE__))
     if (index > 2147483647) {
         printf("Warp warning: tid() is returning an overflowed int\n");
     }
@@ -1427,7 +1451,7 @@ CUDA_CALLABLE inline int slice_get_length(const slice_t& slice)
 
 template <typename T> inline CUDA_CALLABLE T atomic_add(T* buf, T value)
 {
-#if !defined(__CUDA_ARCH__)
+#if !defined(__CUDA_ARCH__) && !defined(__HIP_DEVICE_COMPILE__)
     T old = buf[0];
     buf[0] += value;
     return old;
@@ -1438,11 +1462,11 @@ template <typename T> inline CUDA_CALLABLE T atomic_add(T* buf, T value)
 
 template <> inline CUDA_CALLABLE int64 atomic_add(int64* buf, int64 value)
 {
-#if !defined(__CUDA_ARCH__)
+#if !defined(__CUDA_ARCH__) && !defined(__HIP_DEVICE_COMPILE__)
     int64 old = buf[0];
     buf[0] += value;
     return old;
-#else  // CUDA compiled by NVRTC
+#else  // CUDA/HIP compiled by NVRTC
     unsigned long long int* buf_as_ull = (unsigned long long int*)buf;
     unsigned long long int unsigned_value = static_cast<unsigned long long int>(value);
     unsigned long long int result = atomicAdd(buf_as_ull, unsigned_value);
@@ -1452,10 +1476,17 @@ template <> inline CUDA_CALLABLE int64 atomic_add(int64* buf, int64 value)
 
 template <> inline CUDA_CALLABLE float16 atomic_add(float16* buf, float16 value)
 {
-#if !defined(__CUDA_ARCH__)
+#if !defined(__CUDA_ARCH__) && !defined(__HIP_DEVICE_COMPILE__)
     float16 old = buf[0];
     buf[0] += value;
     return old;
+#elif defined(__HIP_DEVICE_COMPILE__)
+    // ROCm 7.0+: use unsafeAtomicAdd for half precision
+    __half hip_value = __ushort_as_half(value.u);
+    __half r = unsafeAtomicAdd(reinterpret_cast<__half*>(buf), hip_value);
+    float16 result;
+    result.u = __half_as_ushort(r);
+    return result;
 #else  // CUDA compiled by NVRTC
 #if __CUDA_ARCH__ >= 700
 #if defined(__clang__)  // CUDA compiled by Clang
@@ -1486,11 +1517,11 @@ template <> inline CUDA_CALLABLE float16 atomic_add(float16* buf, float16 value)
 
 template <> inline CUDA_CALLABLE float64 atomic_add(float64* buf, float64 value)
 {
-#if !defined(__CUDA_ARCH__)
+#if !defined(__CUDA_ARCH__) && !defined(__HIP_DEVICE_COMPILE__)
     float64 old = buf[0];
     buf[0] += value;
     return old;
-#elif defined(__clang__)  // CUDA compiled by Clang
+#elif defined(__HIP_DEVICE_COMPILE__) || defined(__clang__)
     return atomicAdd(buf, value);
 #else  // CUDA compiled by NVRTC
 
@@ -1517,7 +1548,7 @@ template <> inline CUDA_CALLABLE float64 atomic_add(float64* buf, float64 value)
 
 template <typename T> inline CUDA_CALLABLE T atomic_min(T* address, T val)
 {
-#if defined(__CUDA_ARCH__)
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     return atomicMin(address, val);
 #else
     T old = *address;
@@ -1529,7 +1560,7 @@ template <typename T> inline CUDA_CALLABLE T atomic_min(T* address, T val)
 // emulate atomic float min with atomicCAS()
 template <> inline CUDA_CALLABLE float atomic_min(float* address, float val)
 {
-#if defined(__CUDA_ARCH__)
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 
     int* address_as_i = reinterpret_cast<int*>(address);
     int old = *address_as_i;
@@ -1555,7 +1586,7 @@ template <> inline CUDA_CALLABLE float atomic_min(float* address, float val)
 // emulate atomic double min with atomicCAS()
 template <> inline CUDA_CALLABLE double atomic_min(double* address, double val)
 {
-#if defined(__CUDA_ARCH__)
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 
     unsigned long long* address_as_ull = reinterpret_cast<unsigned long long*>(address);
     unsigned long long old = *address_as_ull;
@@ -1580,7 +1611,7 @@ template <> inline CUDA_CALLABLE double atomic_min(double* address, double val)
 
 template <typename T> inline CUDA_CALLABLE T atomic_max(T* address, T val)
 {
-#if defined(__CUDA_ARCH__)
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     return atomicMax(address, val);
 #else
     T old = *address;
@@ -1592,7 +1623,7 @@ template <typename T> inline CUDA_CALLABLE T atomic_max(T* address, T val)
 // emulate atomic float max with atomicCAS()
 template <> inline CUDA_CALLABLE float atomic_max(float* address, float val)
 {
-#if defined(__CUDA_ARCH__)
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 
     int* address_as_i = reinterpret_cast<int*>(address);
     int old = *address_as_i;
@@ -1618,7 +1649,7 @@ template <> inline CUDA_CALLABLE float atomic_max(float* address, float val)
 // emulate atomic double max with atomicCAS()
 template <> inline CUDA_CALLABLE double atomic_max(double* address, double val)
 {
-#if defined(__CUDA_ARCH__)
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 
     unsigned long long* address_as_ull = reinterpret_cast<unsigned long long*>(address);
     unsigned long long old = *address_as_ull;
@@ -1663,7 +1694,7 @@ CUDA_CALLABLE inline void adj_atomic_minmax(bool* buf, bool* adj_buf, const bool
 
 template <typename T> inline CUDA_CALLABLE T atomic_cas(T* address, T compare, T val)
 {
-#if defined(__CUDA_ARCH__)
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     return atomicCAS(address, compare, val);
 #else
     T old = *address;
@@ -1676,7 +1707,7 @@ template <typename T> inline CUDA_CALLABLE T atomic_cas(T* address, T compare, T
 
 template <> inline CUDA_CALLABLE float atomic_cas(float* address, float compare, float val)
 {
-#if defined(__CUDA_ARCH__)
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     auto result = atomicCAS(
         reinterpret_cast<unsigned int*>(address), reinterpret_cast<unsigned int&>(compare),
         reinterpret_cast<unsigned int&>(val)
@@ -1693,7 +1724,7 @@ template <> inline CUDA_CALLABLE float atomic_cas(float* address, float compare,
 
 template <> inline CUDA_CALLABLE double atomic_cas(double* address, double compare, double val)
 {
-#if defined(__CUDA_ARCH__)
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     auto result = atomicCAS(
         reinterpret_cast<unsigned long long int*>(address), reinterpret_cast<unsigned long long int&>(compare),
         reinterpret_cast<unsigned long long int&>(val)
@@ -1710,7 +1741,7 @@ template <> inline CUDA_CALLABLE double atomic_cas(double* address, double compa
 
 template <> inline CUDA_CALLABLE int64 atomic_cas(int64* address, int64 compare, int64 val)
 {
-#if defined(__CUDA_ARCH__)
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     auto result = atomicCAS(
         reinterpret_cast<unsigned long long int*>(address), reinterpret_cast<unsigned long long int&>(compare),
         reinterpret_cast<unsigned long long int&>(val)
@@ -1727,7 +1758,7 @@ template <> inline CUDA_CALLABLE int64 atomic_cas(int64* address, int64 compare,
 
 template <typename T> inline CUDA_CALLABLE T atomic_exch(T* address, T val)
 {
-#if defined(__CUDA_ARCH__)
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     return atomicExch(address, val);
 #else
     T old = *address;
@@ -1738,7 +1769,7 @@ template <typename T> inline CUDA_CALLABLE T atomic_exch(T* address, T val)
 
 template <> inline CUDA_CALLABLE double atomic_exch(double* address, double val)
 {
-#if defined(__CUDA_ARCH__)
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     auto result = atomicExch(
         reinterpret_cast<unsigned long long int*>(address), reinterpret_cast<unsigned long long int&>(val)
     );
@@ -1752,7 +1783,7 @@ template <> inline CUDA_CALLABLE double atomic_exch(double* address, double val)
 
 template <> inline CUDA_CALLABLE int64 atomic_exch(int64* address, int64 val)
 {
-#if defined(__CUDA_ARCH__)
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     auto result = atomicExch(
         reinterpret_cast<unsigned long long int*>(address), reinterpret_cast<unsigned long long int&>(val)
     );
@@ -1781,7 +1812,7 @@ CUDA_CALLABLE inline void adj_atomic_exch(T* address, T val, T* adj_address, T& 
 
 template <typename T> inline CUDA_CALLABLE T atomic_and(T* buf, T value)
 {
-#if defined(__CUDA_ARCH__)
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     return atomicAnd(buf, value);
 #else
     T old = buf[0];
@@ -1792,7 +1823,7 @@ template <typename T> inline CUDA_CALLABLE T atomic_and(T* buf, T value)
 
 template <typename T> inline CUDA_CALLABLE T atomic_or(T* buf, T value)
 {
-#if defined(__CUDA_ARCH__)
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     return atomicOr(buf, value);
 #else
     T old = buf[0];
@@ -1803,7 +1834,7 @@ template <typename T> inline CUDA_CALLABLE T atomic_or(T* buf, T value)
 
 template <typename T> inline CUDA_CALLABLE T atomic_xor(T* buf, T value)
 {
-#if defined(__CUDA_ARCH__)
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     return atomicXor(buf, value);
 #else
     T old = buf[0];

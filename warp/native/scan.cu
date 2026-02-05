@@ -22,7 +22,13 @@
 
 #define THRUST_IGNORE_CUB_VERSION_CHECK
 
+#if defined(__HIP_PLATFORM_AMD__)
+#include "hip_util.h"
+#include <hipcub/hipcub.hpp>
+namespace cub = hipcub;
+#else
 #include <cub/device/device_scan.cuh>
+#endif
 
 template <typename T> void scan_device(const T* values_in, T* values_out, int n, bool inclusive)
 {

@@ -64,7 +64,7 @@ template <> inline CUDA_CALLABLE float OpMin<float>::identity() const { return 1
 
 template <> inline CUDA_CALLABLE double OpMin<double>::identity() const { return 1e308; }
 
-#if defined(__CUDA_ARCH__)
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 
 template <typename T, typename Op = OpAdd<T>> inline CUDA_CALLABLE T scan_warp_inclusive(int lane, T value)
 {
@@ -72,7 +72,7 @@ template <typename T, typename Op = OpAdd<T>> inline CUDA_CALLABLE T scan_warp_i
     Op op;
 #pragma unroll
     for (int i = 1; i < 32; i *= 2) {
-        auto n = __shfl_up_sync(0xffffffffu, value, i, 32);
+        auto n = __shfl_up_sync(tile_full_mask, value, i, 32);
 
         if (lane >= i)
             value = op(value, n);
@@ -91,7 +91,7 @@ inline CUDA_CALLABLE T scan_warp_exclusive(int lane, T value, T* inclusive_value
         *inclusive_value = inclusive;
 
     // Shift right by 1 to convert inclusive to exclusive
-    T exclusive = __shfl_up_sync(0xffffffffu, inclusive, 1, 32);
+    T exclusive = __shfl_up_sync(tile_full_mask, inclusive, 1, 32);
 
     // Lane 0 gets the identity value
     if (lane == 0)

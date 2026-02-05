@@ -812,7 +812,7 @@ template <typename T> CUDA_CALLABLE inline array_t<T> view(array_t<T>& src, int 
 
 
 template <typename T, size_t... Idxs>
-size_t byte_offset_helper(array_t<T>& src, const slice_t (&slices)[sizeof...(Idxs)], index_sequence<Idxs...>)
+CUDA_CALLABLE inline size_t byte_offset_helper(array_t<T>& src, const slice_t (&slices)[sizeof...(Idxs)], index_sequence<Idxs...>)
 {
     return byte_offset(src, slices[Idxs].start...);
 }

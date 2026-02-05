@@ -135,7 +135,7 @@ GridHandle<BufferT>::GridHandle(T&& buffer)
             cudaCheck(cudaMemcpy(&tmp, d_data, sizeof(GridData), cudaMemcpyDeviceToHost));
             if (!tmp.isValid()) throw std::runtime_error("GridHandle was constructed with an invalid device buffer");
             GridHandleMetaData *d_metaData;
-            cudaMalloc((void**)&d_metaData, tmp.mGridCount*sizeof(GridHandleMetaData));
+            cudaCheck(cudaMalloc((void**)&d_metaData, tmp.mGridCount*sizeof(GridHandleMetaData)));
             cuda::cpyGridHandleMeta<<<1,1>>>(d_data, d_metaData);
             mMetaData.resize(tmp.mGridCount);
             cudaCheck(cudaMemcpy(mMetaData.data(), d_metaData,tmp.mGridCount*sizeof(GridHandleMetaData), cudaMemcpyDeviceToHost));

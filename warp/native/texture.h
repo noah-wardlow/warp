@@ -36,6 +36,18 @@ namespace wp {
 #define WP_TEXTURE_ADDRESS_MIRROR 2
 #define WP_TEXTURE_ADDRESS_BORDER 3
 
+#if defined(__HIP_DEVICE_COMPILE__)
+inline CUDA_CALLABLE hipTextureObject_t wp_texture_object(uint64 tex)
+{
+    return reinterpret_cast<hipTextureObject_t>(tex);
+}
+#else
+inline CUDA_CALLABLE uint64 wp_texture_object(uint64 tex)
+{
+    return tex;
+}
+#endif
+
 // CPU texture descriptor - mirrors the struct in texture.cpp
 // This is what the tex handle points to on CPU
 struct cpu_texture2d_data {
@@ -371,7 +383,9 @@ template <> struct texture_sample_helper<float> {
     static CUDA_CALLABLE float sample_2d(const texture2d_t& tex, float u, float v)
     {
 #if defined(__CUDA_ARCH__)
-        return tex2D<float>(tex.tex, u, v);
+        return tex2D<float>(wp_texture_object(tex.tex), u, v);
+#elif defined(__HIP_DEVICE_COMPILE__)
+        return 0.0f;
 #else
         if (tex.tex == 0)
             return 0.0f;
@@ -383,7 +397,9 @@ template <> struct texture_sample_helper<float> {
     static CUDA_CALLABLE float sample_3d(const texture3d_t& tex, float u, float v, float w)
     {
 #if defined(__CUDA_ARCH__)
-        return tex3D<float>(tex.tex, u, v, w);
+        return tex3D<float>(wp_texture_object(tex.tex), u, v, w);
+#elif defined(__HIP_DEVICE_COMPILE__)
+        return 0.0f;
 #else
         if (tex.tex == 0)
             return 0.0f;
@@ -399,8 +415,10 @@ template <> struct texture_sample_helper<vec2f> {
     static CUDA_CALLABLE vec2f sample_2d(const texture2d_t& tex, float u, float v)
     {
 #if defined(__CUDA_ARCH__)
-        float2 val = tex2D<float2>(tex.tex, u, v);
+        float2 val = tex2D<float2>(wp_texture_object(tex.tex), u, v);
         return vec2f(val.x, val.y);
+#elif defined(__HIP_DEVICE_COMPILE__)
+        return vec2f(0.0f, 0.0f);
 #else
         if (tex.tex == 0)
             return vec2f(0.0f, 0.0f);
@@ -412,8 +430,10 @@ template <> struct texture_sample_helper<vec2f> {
     static CUDA_CALLABLE vec2f sample_3d(const texture3d_t& tex, float u, float v, float w)
     {
 #if defined(__CUDA_ARCH__)
-        float2 val = tex3D<float2>(tex.tex, u, v, w);
+        float2 val = tex3D<float2>(wp_texture_object(tex.tex), u, v, w);
         return vec2f(val.x, val.y);
+#elif defined(__HIP_DEVICE_COMPILE__)
+        return vec2f(0.0f, 0.0f);
 #else
         if (tex.tex == 0)
             return vec2f(0.0f, 0.0f);
@@ -429,8 +449,10 @@ template <> struct texture_sample_helper<vec4f> {
     static CUDA_CALLABLE vec4f sample_2d(const texture2d_t& tex, float u, float v)
     {
 #if defined(__CUDA_ARCH__)
-        float4 val = tex2D<float4>(tex.tex, u, v);
+        float4 val = tex2D<float4>(wp_texture_object(tex.tex), u, v);
         return vec4f(val.x, val.y, val.z, val.w);
+#elif defined(__HIP_DEVICE_COMPILE__)
+        return vec4f(0.0f, 0.0f, 0.0f, 0.0f);
 #else
         if (tex.tex == 0)
             return vec4f(0.0f, 0.0f, 0.0f, 0.0f);
@@ -445,8 +467,10 @@ template <> struct texture_sample_helper<vec4f> {
     static CUDA_CALLABLE vec4f sample_3d(const texture3d_t& tex, float u, float v, float w)
     {
 #if defined(__CUDA_ARCH__)
-        float4 val = tex3D<float4>(tex.tex, u, v, w);
+        float4 val = tex3D<float4>(wp_texture_object(tex.tex), u, v, w);
         return vec4f(val.x, val.y, val.z, val.w);
+#elif defined(__HIP_DEVICE_COMPILE__)
+        return vec4f(0.0f, 0.0f, 0.0f, 0.0f);
 #else
         if (tex.tex == 0)
             return vec4f(0.0f, 0.0f, 0.0f, 0.0f);

@@ -11,8 +11,13 @@
 #define NANOVDB_UTIL_CUDA_TIMER_H_HAS_BEEN_INCLUDED
 
 #include <iostream>// for std::cerr
+#if defined(__HIP_PLATFORM_AMD__)
+#include "hip_util.h"
+#else
 #include <cuda.h>
 #include <cuda_runtime_api.h>
+#endif
+#include <nanovdb/util/cuda/Util.h>
 
 namespace nanovdb {
 
@@ -34,9 +39,9 @@ public:
     ///          when @c stream was created.
     Timer(cudaStream_t stream = 0) : mStream(stream)
     {
-        cudaEventCreate(&mStart);
-        cudaEventCreate(&mStop);
-        cudaEventRecord(mStart, mStream);
+        cudaCheck(cudaEventCreate(&mStart));
+        cudaCheck(cudaEventCreate(&mStop));
+        cudaCheck(cudaEventRecord(mStart, mStream));
     }
 
     /// @brief Construct and start the timer
@@ -52,16 +57,16 @@ public:
         : mStream(stream)
     {
         os << msg << " ... " << std::flush;
-        cudaEventCreate(&mStart);
-        cudaEventCreate(&mStop);
-        cudaEventRecord(mStart, mStream);
+        cudaCheck(cudaEventCreate(&mStart));
+        cudaCheck(cudaEventCreate(&mStop));
+        cudaCheck(cudaEventRecord(mStart, mStream));
     }
 
     /// @brief Destructor
     ~Timer()
     {
-        cudaEventDestroy(mStart);
-        cudaEventDestroy(mStop);
+        cudaCheck(cudaEventDestroy(mStart));
+        cudaCheck(cudaEventDestroy(mStop));
     }
 
     /// @brief Start the timer
@@ -71,7 +76,7 @@ public:
     ///          associated with the same device. So it's important to call
     ///          @c cudaSetDevice(device) so @c device matches the one used
     ///          when @c mStream was created.
-    void start() {cudaEventRecord(mStart, mStream);}
+    void start() {cudaCheck(cudaEventRecord(mStart, mStream));}
 
     /// @brief Start the timer
     /// @param msg string message to be printed when timer is started
@@ -98,15 +103,15 @@ public:
     ///          @c mStream was created.
     inline void record()
     {
-        cudaEventRecord(mStop, mStream);
-        cudaEventSynchronize(mStop);
+        cudaCheck(cudaEventRecord(mStop, mStream));
+        cudaCheck(cudaEventSynchronize(mStop));
     }
 
     /// @brief Return the time in milliseconds since record was called
     inline float milliseconds() const
     {
         float msec = 0.0f;
-        cudaEventElapsedTime(&msec, mStart, mStop);
+        cudaCheck(cudaEventElapsedTime(&msec, mStart, mStop));
         return msec;
     }
 

@@ -20,9 +20,15 @@
 #include "cuda_util.h"
 #include "volume_builder.h"
 
-#include <cub/cub.cuh>
+#if defined(__HIP_PLATFORM_AMD__)
+#include "hip_util.h"
+#include <hipcub/hipcub.hpp>
+namespace cub = hipcub;
+#else
 #include <cuda.h>
 #include <cuda_runtime_api.h>
+#include <cub/cub.cuh>
+#endif
 #include <nanovdb/tools/cuda/PointsToGrid.cuh>
 
 #if defined(__NVCC_DIAG_PRAGMA_SUPPORT__)

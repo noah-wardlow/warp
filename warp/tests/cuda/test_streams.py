@@ -525,6 +525,7 @@ def test_graph_destroy_during_capture(test, device):
 
 
 devices = get_selected_cuda_test_devices()
+graph_devices = [d for d in devices if not d.is_hip]
 
 
 class TestStreams(unittest.TestCase):
@@ -551,6 +552,8 @@ class TestStreams(unittest.TestCase):
     @unittest.skipUnless(len(wp.get_cuda_devices()) > 1, "Requires at least two CUDA devices")
     @unittest.skipUnless(check_p2p(), "Peer-to-Peer transfers not supported")
     def test_stream_arg_graph_mgpu(self):
+        if any(d.is_hip for d in wp.get_cuda_devices()):
+            self.skipTest("CUDA graph capture is not supported on HIP")
         wp.load_module(device="cuda:0")
         wp.load_module(device="cuda:1")
 
@@ -601,6 +604,8 @@ class TestStreams(unittest.TestCase):
     @unittest.skipUnless(len(wp.get_cuda_devices()) > 1, "Requires at least two CUDA devices")
     @unittest.skipUnless(check_p2p(), "Peer-to-Peer transfers not supported")
     def test_stream_scope_graph_mgpu(self):
+        if any(d.is_hip for d in wp.get_cuda_devices()):
+            self.skipTest("CUDA graph capture is not supported on HIP")
         wp.load_module(device="cuda:0")
         wp.load_module(device="cuda:1")
 
@@ -681,10 +686,10 @@ add_function_test(TestStreams, "test_stream_event_is_complete", test_stream_even
 
 add_function_test(TestStreams, "test_event_synchronize", test_event_synchronize, devices=devices)
 add_function_test(TestStreams, "test_event_elapsed_time", test_event_elapsed_time, devices=devices)
-add_function_test(TestStreams, "test_event_elapsed_time_graph", test_event_elapsed_time_graph, devices=devices)
-add_function_test(TestStreams, "test_event_external", test_event_external, devices=devices)
+add_function_test(TestStreams, "test_event_elapsed_time_graph", test_event_elapsed_time_graph, devices=graph_devices)
+add_function_test(TestStreams, "test_event_external", test_event_external, devices=graph_devices)
 
-add_function_test(TestStreams, "test_graph_destroy_during_capture", test_graph_destroy_during_capture, devices=devices)
+add_function_test(TestStreams, "test_graph_destroy_during_capture", test_graph_destroy_during_capture, devices=graph_devices)
 
 if __name__ == "__main__":
     wp.clear_kernel_cache()

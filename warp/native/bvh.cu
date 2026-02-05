@@ -24,13 +24,18 @@
 #include <algorithm>
 #include <vector>
 
+#if defined(__HIP_PLATFORM_AMD__)
+#include "hip_util.h"
+#include <hipcub/hipcub.hpp>
+namespace cub = hipcub;
+#else
 #include <cuda.h>
 #include <cuda_runtime_api.h>
+#include <cub/cub.cuh>
+#endif
 
 #define THRUST_IGNORE_CUB_VERSION_CHECK
 #define REORDER_HOST_TREE
-
-#include <cub/cub.cuh>
 
 extern CUcontext get_current_context();
 
@@ -237,6 +242,209 @@ __global__ void compute_key_deltas(const uint64_t* __restrict__ keys, int* __res
         const uint64_t diff = keys[index] ^ keys[index + 1];
         deltas[index] = (diff == 0) ? 64 : __clzll(diff);
     }
+}
+
+// Deterministic Karras-style LBVH topology build (avoids atomics/threadfence issues on HIP).
+// Builds internal nodes [n..2n-2] from sorted keys[0..n-1] and writes:
+// - node child pointers into bvh node_lowers/node_uppers (as indices)
+// - node_parents for all nodes
+// - range_lefts/range_rights for all nodes (inclusive range in sorted order)
+// - root index
+static __device__ __forceinline__ int delta_prefix(const uint64_t* __restrict__ keys, int n, int i, int j)
+{
+    if (j < 0 || j >= n) return -1;
+    const uint64_t a = keys[i];
+    const uint64_t b = keys[j];
+    const uint64_t diff = a ^ b;
+    if (diff == 0ull)
+    {
+        // Tie-break identical keys with index distance (matches common LBVH practice)
+        // Larger is better: use 64 + leading zeros of index xor
+        const unsigned int idiff = (unsigned int)(i ^ j);
+        return 64 + __clz(idiff);
+    }
+    return __clzll(diff);
+}
+
+__global__ void build_karras_topology(
+    int n,
+    int* root,
+    const uint64_t* __restrict__ keys,
+    volatile int* __restrict__ range_lefts,
+    volatile int* __restrict__ range_rights,
+    volatile int* __restrict__ parents,
+    volatile BVHPackedNodeHalf* __restrict__ lowers,
+    volatile BVHPackedNodeHalf* __restrict__ uppers)
+{
+    const int i = blockDim.x * blockIdx.x + threadIdx.x;
+    if (i >= n - 1) return;  // n-1 internal nodes
+
+    const int internal_offset = n;
+
+    // Determine direction of the range (+1 or -1)
+    const int delta_next = delta_prefix(keys, n, i, i + 1);
+    const int delta_prev = delta_prefix(keys, n, i, i - 1);
+    const int d = (delta_next - delta_prev) >= 0 ? 1 : -1;
+
+    // Compute upper bound for the length of the range
+    const int delta_min = delta_prefix(keys, n, i, i - d);
+
+    int l_max = 2;
+    while (delta_prefix(keys, n, i, i + l_max * d) > delta_min)
+        l_max *= 2;
+
+    // Find the other end using binary search
+    int l = 0;
+    for (int t = l_max / 2; t >= 1; t /= 2)
+    {
+        if (delta_prefix(keys, n, i, i + (l + t) * d) > delta_min)
+            l += t;
+    }
+    const int j = i + l * d;
+
+    const int first = min(i, j);
+    const int last = max(i, j);
+
+    // Find split position (canonical Karras)
+    const int delta_node = delta_prefix(keys, n, first, last);
+
+    int split = first;
+    int step = last - first;
+    do
+    {
+        step = (step + 1) >> 1;
+        const int new_split = split + step;
+        if (new_split < last)
+        {
+            const int delta_split = delta_prefix(keys, n, first, new_split);
+            if (delta_split > delta_node)
+                split = new_split;
+        }
+    } while (step > 1);
+
+    const int internal_index = internal_offset + i;
+
+    const int left_child = (split == first) ? first : (internal_offset + split);
+    const int right_child = (split + 1 == last) ? last : (internal_offset + split + 1);
+
+    // Write internal node children
+    lowers[internal_index].i = left_child;
+    lowers[internal_index].b = 0;
+    uppers[internal_index].i = right_child;
+    uppers[internal_index].b = 0;
+
+    // Parent pointers
+    parents[left_child] = internal_index;
+    parents[right_child] = internal_index;
+
+    // Range (inclusive)
+    range_lefts[internal_index] = first;
+    range_rights[internal_index] = last;
+
+    // Identify root: the node whose range covers [0, n-1]
+    if (first == 0 && last == n - 1)
+    {
+        *root = internal_index;
+        parents[internal_index] = -1;
+    }
+}
+
+// Deterministic refit by depth levels (avoids atomics and is robust on HIP).
+// We compute depth-from-root for all nodes, then union child bounds from deeper to shallower levels.
+__global__ void compute_node_depths(
+    int n_nodes,
+    const int* __restrict__ parents,
+    int* __restrict__ depths,
+    int max_steps)
+{
+    int idx = blockDim.x * blockIdx.x + threadIdx.x;
+    if (idx >= n_nodes)
+        return;
+
+    int depth = 1;
+    int p = parents[idx];
+    int steps = 0;
+    while (p != -1 && steps < max_steps)
+    {
+        p = parents[p];
+        depth++;
+        steps++;
+    }
+
+    depths[idx] = depth;
+}
+
+// Parallel reduction kernel to find maximum value using shared memory
+__global__ void reduce_max_int(const int* __restrict__ values, int n, int* __restrict__ out_max)
+{
+    extern __shared__ int sdata[];
+    
+    unsigned int tid = threadIdx.x;
+    unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
+    unsigned int gridSize = blockDim.x * gridDim.x;
+    
+    // Initialize shared memory with identity value (INT_MIN for max operation)
+    int thread_max = INT_MIN;
+    
+    // Grid-stride loop to handle arrays larger than grid size
+    while (i < n)
+    {
+        thread_max = max(thread_max, values[i]);
+        i += gridSize;
+    }
+    
+    sdata[tid] = thread_max;
+    __syncthreads();
+    
+    // Parallel reduction in shared memory using sequential addressing
+    for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1)
+    {
+        if (tid < s)
+        {
+            sdata[tid] = max(sdata[tid], sdata[tid + s]);
+        }
+        __syncthreads();
+    }
+    
+    // Write result for this block to global memory
+    if (tid == 0)
+    {
+        atomicMax(out_max, sdata[0]);
+    }
+}
+
+__global__ void refit_nodes_at_depth(
+    int n_nodes,
+    int target_depth,
+    const int* __restrict__ depths,
+    BVHPackedNodeHalf* __restrict__ node_lowers,
+    BVHPackedNodeHalf* __restrict__ node_uppers)
+{
+    int idx = blockDim.x * blockIdx.x + threadIdx.x;
+    if (idx >= n_nodes)
+        return;
+
+    if (depths[idx] != target_depth)
+        return;
+
+    // Skip leaves (their bounds already valid)
+    BVHPackedNodeHalf lower = bvh_load_node(node_lowers, idx);
+    if (lower.b)
+        return;
+
+    const int left = lower.i;
+    const int right = bvh_load_node(node_uppers, idx).i;
+
+    BVHPackedNodeHalf ll = bvh_load_node(node_lowers, left);
+    BVHPackedNodeHalf lu = bvh_load_node(node_uppers, left);
+    BVHPackedNodeHalf rl = bvh_load_node(node_lowers, right);
+    BVHPackedNodeHalf ru = bvh_load_node(node_uppers, right);
+
+    const vec3 out_lower = min(vec3(ll.x, ll.y, ll.z), vec3(rl.x, rl.y, rl.z));
+    const vec3 out_upper = max(vec3(lu.x, lu.y, lu.z), vec3(ru.x, ru.y, ru.z));
+
+    make_node(node_lowers + idx, out_lower, left, false);
+    make_node(node_uppers + idx, out_upper, right, false);
 }
 
 __global__ void build_leaves(
@@ -460,6 +668,78 @@ __global__ void mark_packed_leaf_nodes(
 CUDA_CALLABLE inline vec3 Vec3Max(const vec3& a, const vec3& b) { return wp::max(a, b); }
 CUDA_CALLABLE inline vec3 Vec3Min(const vec3& a, const vec3& b) { return wp::min(a, b); }
 
+#if defined(__HIP_PLATFORM_AMD__)
+// Deterministic bounds reduction for HIP (avoids vec3 atomics which are not safe/portable on HIP).
+__global__ void compute_block_bounds(
+    const vec3* item_lowers,
+    const vec3* item_uppers,
+    vec3* block_lowers,
+    vec3* block_uppers,
+    int num_items)
+{
+    typedef cub::BlockReduce<vec3, WP_BVH_BLOCK_DIM> BlockReduce;
+    __shared__ typename BlockReduce::TempStorage temp_storage;
+
+    const int blockStart = blockDim.x * blockIdx.x;
+    const int numValid = ::min(num_items - blockStart, (int)blockDim.x);
+    const int tid = blockStart + threadIdx.x;
+
+    vec3 lower = vec3(FLT_MAX);
+    vec3 upper = vec3(-FLT_MAX);
+    if (tid < num_items)
+    {
+        lower = item_lowers[tid];
+        upper = item_uppers[tid];
+    }
+
+    vec3 block_upper = BlockReduce(temp_storage).Reduce(upper, Vec3Max, numValid);
+    __syncthreads();
+    vec3 block_lower = BlockReduce(temp_storage).Reduce(lower, Vec3Min, numValid);
+
+    if (threadIdx.x == 0)
+    {
+        block_lowers[blockIdx.x] = block_lower;
+        block_uppers[blockIdx.x] = block_upper;
+    }
+}
+
+// Block size for the final reduction kernel
+#define REDUCE_BLOCK_DIM 256
+
+__global__ void reduce_block_bounds(
+    const vec3* block_lowers,
+    const vec3* block_uppers,
+    int num_blocks,
+    vec3* total_lower,
+    vec3* total_upper)
+{
+    typedef cub::BlockReduce<vec3, REDUCE_BLOCK_DIM> BlockReduce;
+    __shared__ typename BlockReduce::TempStorage temp_storage;
+
+    // Each thread processes multiple elements with striding
+    vec3 lo = vec3(FLT_MAX);
+    vec3 hi = vec3(-FLT_MAX);
+
+    for (int i = threadIdx.x; i < num_blocks; i += blockDim.x)
+    {
+        lo = min(lo, block_lowers[i]);
+        hi = max(hi, block_uppers[i]);
+    }
+
+    // Now reduce across all threads in the block
+    // All threads have valid data (strided access, initial value is identity for min/max)
+    vec3 block_upper = BlockReduce(temp_storage).Reduce(hi, Vec3Max);
+    __syncthreads();
+    vec3 block_lower = BlockReduce(temp_storage).Reduce(lo, Vec3Min);
+
+    if (threadIdx.x == 0)
+    {
+        total_lower[0] = block_lower;
+        total_upper[0] = block_upper;
+    }
+}
+#else
+// Original CUDA version with atomic vec3 operations
 __global__ void compute_total_bounds(
     const vec3* item_lowers, const vec3* item_uppers, vec3* total_lower, vec3* total_upper, int num_items
 )
@@ -491,6 +771,7 @@ __global__ void compute_total_bounds(
         }
     }
 }
+#endif
 
 // compute inverse edge length, this is just done on the GPU to avoid a CPU->GPU sync point
 __global__ void compute_total_inv_edges(const vec3* total_lower, const vec3* total_upper, vec3* total_inv_edges)
@@ -567,11 +848,35 @@ void LinearBVHBuilderGPU::build(
             WP_CURRENT_CONTEXT, memset_kernel, sizeof(vec3) / 4, ((int*)total_upper, NEG_FLT_MAX_BITS, sizeof(vec3) / 4)
         );
 
-        // compute the total bounds on the GPU
+#if defined(__HIP_PLATFORM_AMD__)
+        // Deterministic reduction: per-block bounds then single-thread final reduce
+        const int num_threads = WP_BVH_BLOCK_DIM;
+        const int nb1 = (num_items + num_threads - 1) / num_threads;
+        
+        vec3* block_lowers = (vec3*)wp_alloc_device(WP_CURRENT_CONTEXT, sizeof(vec3) * nb1);
+        vec3* block_uppers = (vec3*)wp_alloc_device(WP_CURRENT_CONTEXT, sizeof(vec3) * nb1);
+
+        wp_launch_device(
+            WP_CURRENT_CONTEXT, compute_block_bounds, num_items,
+            (item_lowers, item_uppers, block_lowers, block_uppers, num_items)
+        );
+        wp_launch_device(
+            WP_CURRENT_CONTEXT, reduce_block_bounds, 1,
+            (block_lowers, block_uppers, nb1, total_lower, total_upper)
+        );
+
+        // Synchronize before freeing temporary buffers
+        (void)cuCtxSynchronize_f();
+
+        wp_free_device(WP_CURRENT_CONTEXT, block_lowers);
+        wp_free_device(WP_CURRENT_CONTEXT, block_uppers);
+#else
+        // compute the total bounds on the GPU (CUDA version with atomics)
         wp_launch_device(
             WP_CURRENT_CONTEXT, compute_total_bounds, num_items,
             (item_lowers, item_uppers, total_lower, total_upper, num_items)
         );
+#endif
 
         // compute the total edge length
         wp_launch_device(WP_CURRENT_CONTEXT, compute_total_inv_edges, 1, (total_lower, total_upper, total_inv_edges));
@@ -588,7 +893,7 @@ void LinearBVHBuilderGPU::build(
     radix_sort_pairs_device(WP_CURRENT_CONTEXT, keys, indices, num_items);
     wp_memcpy_d2d(WP_CURRENT_CONTEXT, bvh.primitive_indices, indices, sizeof(int) * num_items);
 
-    // calculate deltas between adjacent keys
+    // calculate deltas between adjacent keys (kept for debugging, not required by Karras builder)
     wp_launch_device(WP_CURRENT_CONTEXT, compute_key_deltas, num_items, (keys, deltas, num_items - 1));
 
     // initialize leaf nodes
@@ -597,8 +902,57 @@ void LinearBVHBuilderGPU::build(
         (item_lowers, item_uppers, num_items, indices, range_lefts, range_rights, bvh.node_lowers, bvh.node_uppers)
     );
 
-    // reset children count, this is our atomic counter so we know when an internal node is complete, only used during
-    // building
+#if defined(__HIP_PLATFORM_AMD__)
+    // Use deterministic Karras-style topology builder for HIP
+    // Initialize parents to -1
+    wp_memset_device(WP_CURRENT_CONTEXT, bvh.node_parents, 0xFF, sizeof(int) * bvh.max_nodes);
+
+    // Build topology deterministically (Karras)
+    wp_launch_device(
+        WP_CURRENT_CONTEXT, build_karras_topology, num_items,
+        (num_items, bvh.root, keys, range_lefts, range_rights, bvh.node_parents, bvh.node_lowers, bvh.node_uppers)
+    );
+
+    // Deterministic refit by depth levels:
+    // Reuse num_children buffer as node_depths (size = max_nodes).
+    int* node_depths = num_children;  // reuse buffer
+    int* max_depth_dev = (int*)wp_alloc_device(WP_CURRENT_CONTEXT, sizeof(int));
+    wp_memset_device(WP_CURRENT_CONTEXT, max_depth_dev, 0, sizeof(int));
+
+    // compute depths for all nodes
+    const int num_threads_nodes = WP_BVH_BLOCK_DIM;
+    const int nb_nodes = (bvh.max_nodes + num_threads_nodes - 1) / num_threads_nodes;
+    wp_launch_device(
+        WP_CURRENT_CONTEXT, compute_node_depths, bvh.max_nodes,
+        (bvh.max_nodes, bvh.node_parents, node_depths, 1024)
+    );
+
+    // Initialize output to INT_MIN before reduction
+    int init_val = INT_MIN;
+    wp_memcpy_h2d(WP_CURRENT_CONTEXT, max_depth_dev, &init_val, sizeof(int));
+
+    // Find maximum depth using parallel reduction
+    const int num_blocks = min(256, nb_nodes);
+    const int shared_mem_size = num_threads_nodes * sizeof(int);
+    
+    reduce_max_int<<<num_blocks, num_threads_nodes, shared_mem_size>>>(node_depths, bvh.max_nodes, max_depth_dev);
+
+    int max_depth_host = 0;
+    wp_memcpy_d2h(WP_CURRENT_CONTEXT, &max_depth_host, max_depth_dev, sizeof(int));
+    wp_free_device(WP_CURRENT_CONTEXT, max_depth_dev);
+
+    // Refit internal nodes from deepest to root.
+    // Root depth is 1 in our depth definition; leaves have the largest depths.
+    for (int d = max_depth_host - 1; d >= 1; --d)
+    {
+        wp_launch_device(
+            WP_CURRENT_CONTEXT, refit_nodes_at_depth, bvh.max_nodes,
+            (bvh.max_nodes, d, node_depths, bvh.node_lowers, bvh.node_uppers)
+        );
+    }
+#else
+    // Original CUDA version with atomics-based hierarchy builder
+    // reset children count, this is our atomic counter so we know when an internal node is complete
     wp_memset_device(WP_CURRENT_CONTEXT, num_children, 0, sizeof(int) * bvh.max_nodes);
 
     // build the tree and internal node bounds
@@ -607,11 +961,18 @@ void LinearBVHBuilderGPU::build(
         (num_items, bvh.root, deltas, keys, num_children, bvh.primitive_indices, range_lefts, range_rights,
          bvh.node_parents, bvh.node_lowers, bvh.node_uppers)
     );
+#endif
+
     wp_launch_device(
         WP_CURRENT_CONTEXT, mark_packed_leaf_nodes, bvh.max_nodes,
         (bvh.max_nodes, range_lefts, range_rights, bvh.node_parents, keys, bvh.node_lowers, bvh.node_uppers,
          bvh.leaf_size)
     );
+
+#if defined(__HIP_PLATFORM_AMD__)
+    // Ensure all build kernels completed before freeing scratch buffers / returning.
+    (void)cuCtxSynchronize_f();
+#endif
 
     // free temporary memory
     wp_free_device(WP_CURRENT_CONTEXT, indices);

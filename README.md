@@ -288,7 +288,8 @@ For developers who want to build the library themselves, the following tools are
 
 * Microsoft Visual Studio 2019 upwards (Windows)
 * GCC 9.4 upwards (Linux)
-* CUDA Toolkit 12.0 or higher
+* CUDA Toolkit 12.0 or higher (For CUDA builds)
+* ROCm 7.0 or higher (for HIP builds)
 * [Git LFS](https://git-lfs.github.com/) installed
 
 After cloning the repository, users should run:
@@ -308,6 +309,26 @@ pip install -e .
 ```
 
 This ensures that subsequent modifications to the library will be reflected in the Python package.
+
+### HIP/ROCm builds (AMD GPUs)
+
+HIP/ROCm is auto-detected just like CUDA. Ensure ROCm 7.x is installed
+and `hipcc`, `hipconfig` are on your `PATH` or under `ROCM_PATH`. 
+If you're using TheRock (e.g., `rocm`/`rocm-sdk` wheels), locate the install root with
+`rocm-sdk path --bin` and set `ROCM_PATH` to its parent directory so the toolchain and headers resolve
+correctly. Then build with the same command:
+
+```text
+python build_lib.py
+```
+
+The build script will automatically detect and enable HIP if ROCm is found.
+You can also specify a custom ROCm path with `--rocm-path="..."`.
+
+#### Tips
+- To target a specific AMD GPU architecture, pass `--hip-arch="gfx942"`.
+- For a non-fat build, building for the default architecture (gfx942) pass `--quick`.
+- To build in debug mode, pass `--mode=debug`.
 
 ## Learn More
 

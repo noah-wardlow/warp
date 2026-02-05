@@ -14,8 +14,12 @@
 #ifndef NANOVDB_UTIL_CUDA_UTIL_H_HAS_BEEN_INCLUDED
 #define NANOVDB_UTIL_CUDA_UTIL_H_HAS_BEEN_INCLUDED
 
+#if defined(__HIP_PLATFORM_AMD__)
+#include "hip_util.h"
+#else
 #include <cuda.h>
 #include <cuda_runtime_api.h>
+#endif
 #include <nanovdb/util/Util.h> // for stderr and NANOVDB_ASSERT
 
 // change 1 -> 0 to only perform asserts during debug builds
@@ -141,7 +145,7 @@ inline int deviceCount()
 inline void printDevInfo(int device, const char *preMsg = nullptr, std::FILE* file = stderr)
 {
     cudaDeviceProp prop;
-    cudaGetDeviceProperties(&prop, device);
+    cudaCheck(cudaGetDeviceProperties(&prop, device));
     if (preMsg) fprintf(file, "%s ", preMsg);
     fprintf(file,"GPU #%d, named \"%s\", compute capability %d.%d, %zu GB of VRAM\n",
             device, prop.name, prop.major, prop.minor, prop.totalGlobalMem >> 30);
@@ -236,7 +240,7 @@ inline cudaError_t memPrefetchAsync(const void* devPtr, size_t count, int dstDev
 }
 #endif
 
-#if defined(__CUDACC__)// the following functions only run on the GPU!
+#if defined(__CUDACC__) || defined(__HIPCC__)// the following functions only run on the GPU!
 
 /// @brief Cuda kernel that launches device lambda functions
 /// @param numItems Problem size
@@ -310,13 +314,13 @@ void dynamicSharedMemoryLauncher(const size_t numItems, const size_t smem_size, 
         <<<numItems, Operator::MaxThreadsPerBlock, smem_size, stream>>>( args ... );
 }
 
-#endif// __CUDACC__
+#endif// __CUDACC__ || __HIPCC__
 
 }// namespace util::cuda ============================================================
 
 }// namespace nanovdb ===============================================================
 
-#if defined(__CUDACC__)// the following functions only run on the GPU!
+#if defined(__CUDACC__) || defined(__HIPCC__)// the following functions only run on the GPU!
 template<typename Func, typename... Args>
 [[deprecated("Use nanovdb::cuda::lambdaKernel instead")]]
 __global__ void cudaLambdaKernel(const size_t numItems, Func func, Args... args)
@@ -325,6 +329,6 @@ __global__ void cudaLambdaKernel(const size_t numItems, Func func, Args... args)
     if (tid >= numItems) return;
     func(tid, args...);
 }
-#endif// __CUDACC__
+#endif// __CUDACC__ || __HIPCC__
 
 #endif// NANOVDB_UTIL_CUDA_UTIL_H_HAS_BEEN_INCLUDED

@@ -895,7 +895,7 @@ WP_API void wp_nvrtc_supported_archs(int* archs) { }
 WP_API int wp_cuda_device_get_count() { return 0; }
 WP_API void* wp_cuda_device_get_primary_context(int ordinal) { return NULL; }
 WP_API const char* wp_cuda_device_get_name(int ordinal) { return NULL; }
-WP_API int wp_cuda_device_get_arch(int ordinal) { return 0; }
+WP_API const char* wp_cuda_device_get_arch(int ordinal) { return NULL; }
 WP_API int wp_cuda_device_get_sm_count(int ordinal) { return 0; }
 WP_API void wp_cuda_device_get_uuid(int ordinal, char uuid[16]) { }
 WP_API int wp_cuda_device_get_pci_domain_id(int ordinal) { return -1; }
@@ -1009,7 +1009,7 @@ WP_API bool wp_cuda_graph_update_memcpy_batch(
 WP_API size_t wp_cuda_compile_program(
     const char* cuda_src,
     const char* program_name,
-    int arch,
+    const char* arch,
     const char* include_dir,
     int num_cuda_include_dirs,
     const char** cuda_include_dirs,

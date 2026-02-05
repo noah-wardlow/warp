@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit tests for 2D and 3D texture functionality on both CPU and CUDA devices."""
+"""Unit tests for 2D and 3D texture functionality on both CPU and GPU devices."""
 
 import unittest
 
@@ -1516,7 +1516,7 @@ def test_texture2d_mirror_linear_edge(test, device):
 
     result_edge = output.numpy()[0]
     # With correct MIRROR: result should be close to 3.0 but may interpolate with mirrored neighbor
-    # The key is it should match CUDA behavior
+    # The key is it should match CUDA/HIP behavior
     test.assertGreater(result_edge, 2.0, f"MIRROR mode result unexpected: got {result_edge}")
 
 
@@ -2038,11 +2038,11 @@ class TestTexture(unittest.TestCase):
     pass
 
 
-# Register tests - textures work on both CPU and CUDA devices
+# Register tests - textures work on both CPU and GPU devices
 cuda_devices = get_selected_cuda_test_devices()
 all_devices = get_test_devices()
 
-# Core texture tests - run on all devices (CPU + CUDA)
+# Core texture tests - run on all devices (CPU + GPU)
 add_function_test(TestTexture, "test_texture2d_1channel", test_texture2d_1channel, devices=all_devices)
 add_function_test(TestTexture, "test_texture2d_2channel", test_texture2d_2channel, devices=all_devices)
 add_function_test(TestTexture, "test_texture2d_4channel", test_texture2d_4channel, devices=all_devices)

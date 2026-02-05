@@ -41,9 +41,9 @@ template <typename T> int argmin_tracker(T champion_value, T current_value, int 
 }
 
 
-#if defined(__CUDA_ARCH__)
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 
-template <typename T> inline CUDA_CALLABLE T warp_shuffle_down(T val, int offset, int mask)
+template <typename T> inline CUDA_CALLABLE T warp_shuffle_down(T val, int offset, tile_mask_t mask)
 {
     typedef unsigned int Word;
 
@@ -77,7 +77,7 @@ template <typename T> inline CUDA_CALLABLE T warp_shuffle_down(T val, int offset
 
 // vector overload
 template <unsigned Length, typename T>
-inline CUDA_CALLABLE wp::vec_t<Length, T> warp_shuffle_down(wp::vec_t<Length, T> val, int offset, int mask)
+inline CUDA_CALLABLE wp::vec_t<Length, T> warp_shuffle_down(wp::vec_t<Length, T> val, int offset, tile_mask_t mask)
 {
     wp::vec_t<Length, T> result;
 
@@ -89,7 +89,7 @@ inline CUDA_CALLABLE wp::vec_t<Length, T> warp_shuffle_down(wp::vec_t<Length, T>
 
 // matrix overload
 template <unsigned Rows, unsigned Cols, typename T>
-inline CUDA_CALLABLE wp::mat_t<Rows, Cols, T> warp_shuffle_down(wp::mat_t<Rows, Cols, T> val, int offset, int mask)
+inline CUDA_CALLABLE wp::mat_t<Rows, Cols, T> warp_shuffle_down(wp::mat_t<Rows, Cols, T> val, int offset, tile_mask_t mask)
 {
     wp::mat_t<Rows, Cols, T> result;
 
@@ -101,11 +101,11 @@ inline CUDA_CALLABLE wp::mat_t<Rows, Cols, T> warp_shuffle_down(wp::mat_t<Rows, 
 }
 
 
-template <typename T, typename Op> inline CUDA_CALLABLE T warp_reduce(T val, Op f, unsigned int mask)
+template <typename T, typename Op> inline CUDA_CALLABLE T warp_reduce(T val, Op f, tile_mask_t mask)
 {
     T sum = val;
 
-    if (mask == 0xFFFFFFFF) {
+    if (mask == tile_full_mask) {
         // handle case where entire warp is active
         for (int offset = WP_TILE_WARP_SIZE / 2; offset > 0; offset /= 2) {
             sum = f(sum, warp_shuffle_down(sum, offset, mask));
@@ -114,7 +114,7 @@ template <typename T, typename Op> inline CUDA_CALLABLE T warp_reduce(T val, Op 
         // handle partial warp case - works for contiguous masks
         for (int offset = WP_TILE_WARP_SIZE / 2; offset > 0; offset /= 2) {
             T shfl_val = warp_shuffle_down(sum, offset, mask);
-            if ((mask & (1 << ((threadIdx.x + offset) % WP_TILE_WARP_SIZE))) != 0)
+            if ((mask & (tile_mask_t(1) << ((threadIdx.x + offset) % WP_TILE_WARP_SIZE))) != 0)
                 sum = f(sum, shfl_val);
         }
     }
@@ -128,12 +128,12 @@ template <typename T> struct ValueAndIndex {
 };
 
 template <typename T, typename Op, typename OpTrack>
-inline CUDA_CALLABLE ValueAndIndex<T> warp_reduce_tracked(T val, int idx, Op f, OpTrack track, unsigned int mask)
+inline CUDA_CALLABLE ValueAndIndex<T> warp_reduce_tracked(T val, int idx, Op f, OpTrack track, tile_mask_t mask)
 {
     T sum = val;
     int index = idx;
 
-    if (mask == 0xFFFFFFFF) {
+    if (mask == tile_full_mask) {
         // handle case where entire warp is active
         for (int offset = WP_TILE_WARP_SIZE / 2; offset > 0; offset /= 2) {
             auto shfl_val = warp_shuffle_down(sum, offset, mask);
@@ -146,7 +146,7 @@ inline CUDA_CALLABLE ValueAndIndex<T> warp_reduce_tracked(T val, int idx, Op f, 
         for (int offset = WP_TILE_WARP_SIZE / 2; offset > 0; offset /= 2) {
             T shfl_val = warp_shuffle_down(sum, offset, mask);
             int shfl_index = warp_shuffle_down(index, offset, mask);
-            if ((mask & (1 << ((threadIdx.x + offset) % WP_TILE_WARP_SIZE))) != 0) {
+            if ((mask & (tile_mask_t(1) << ((threadIdx.x + offset) % WP_TILE_WARP_SIZE))) != 0) {
                 index = track(sum, shfl_val, index, shfl_index);
                 sum = f(sum, shfl_val);
             }
@@ -171,7 +171,7 @@ block_combine_thread_results(T thread_sum, bool thread_has_data, Op f, T* partia
     const int lane_index = threadIdx.x % WP_TILE_WARP_SIZE;
 
     // determine which threads have data
-    unsigned int mask = __ballot_sync(0xFFFFFFFF, thread_has_data);
+    tile_mask_t mask = __ballot_sync(tile_full_mask, thread_has_data);
     bool warp_is_active = mask != 0;
 
     // warp reduction
@@ -231,12 +231,12 @@ template <typename Tile, typename Op> CUDA_CALLABLE_DEVICE auto tile_reduce_impl
     T block_sum;
     if constexpr (warp_count == 1) {
         // fast path: single warp, just do warp reduction
-        unsigned int mask = __ballot_sync(0xFFFFFFFF, thread_has_data);
+        tile_mask_t mask = __ballot_sync(tile_full_mask, thread_has_data);
         if (thread_has_data)
             block_sum = warp_reduce(thread_sum, f, mask);
 
         // write from first active lane (warp_reduce result is only valid there)
-        int first_active = __ffs(mask) - 1;
+        int first_active = tile_ffs(mask) - 1;
         if (threadIdx.x == first_active)
             output.data[0] = block_sum;
     } else {
@@ -327,7 +327,7 @@ template <int Axis, typename Op, typename Tile> CUDA_CALLABLE_DEVICE auto tile_r
                 }
 
                 // warp reduce this chunk (only valid lanes participate)
-                unsigned int mask = __ballot_sync(0xFFFFFFFF, valid);
+                tile_mask_t mask = __ballot_sync(tile_full_mask, valid);
                 T chunk_result = warp_reduce(val, f, mask);
 
                 // lane 0 accumulates the chunk result
@@ -379,12 +379,12 @@ template <int Axis, typename Op, typename Tile> CUDA_CALLABLE_DEVICE auto tile_r
             T block_sum;
             if constexpr (warp_count == 1) {
                 // fast path: single warp, just do warp reduction
-                unsigned int mask = __ballot_sync(0xFFFFFFFF, thread_has_data);
+                tile_mask_t mask = __ballot_sync(tile_full_mask, thread_has_data);
                 if (thread_has_data)
                     block_sum = warp_reduce(thread_sum, f, mask);
 
                 // write from first active lane (warp_reduce result is only valid there)
-                int first_active = __ffs(mask) - 1;
+                int first_active = tile_ffs(mask) - 1;
                 if (threadIdx.x == first_active)
                     output_buffer[out_idx] = block_sum;
             } else {
@@ -452,7 +452,7 @@ CUDA_CALLABLE_DEVICE auto tile_arg_reduce_impl(Op f, OpTrack track, Tile& t)
     }
 
     // ensure that only threads with at least one valid item participate in the reduction
-    unsigned int mask = __ballot_sync(__activemask(), Layout::valid(Layout::linear_from_register(0)));
+    tile_mask_t mask = __ballot_sync(__activemask(), Layout::valid(Layout::linear_from_register(0)));
     bool warp_is_active = mask != 0;
 
     // warp reduction
@@ -637,7 +637,7 @@ template <typename Tile, typename AdjTile> CUDA_CALLABLE void adj_tile_sum(Tile&
 
     auto adj_reg = adj_ret.grad_to_register();
 
-#if !defined(__CUDA_ARCH__)
+#if !defined(__CUDA_ARCH__) && !defined(__HIP_DEVICE_COMPILE__)
     T scratch = adj_reg.data[0];
 #else
     // broadcast incoming adjoint to block

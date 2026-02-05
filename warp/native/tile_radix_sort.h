@@ -97,7 +97,7 @@ constexpr inline CUDA_CALLABLE int next_higher_pow2(int input)
 }
 
 
-#if defined(__CUDA_ARCH__)
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 
 
 // Bitonic sort fast pass for small arrays
@@ -165,8 +165,8 @@ inline CUDA_CALLABLE void bitonic_sort_single_stage_full_thread_block(
 template <typename K, typename V>
 inline CUDA_CALLABLE void bitonic_sort_single_stage_full_warp(int k, unsigned int thread_id, int stride, K& key, V& val)
 {
-    auto s_key = __shfl_xor_sync(0xFFFFFFFFu, key, stride);
-    auto s_val = __shfl_xor_sync(0xFFFFFFFFu, val, stride);
+    auto s_key = __shfl_xor_sync(tile_full_mask, key, stride);
+    auto s_val = __shfl_xor_sync(tile_full_mask, val, stride);
     auto swap = (((thread_id & stride) != 0 ? key > s_key : key < s_key)) ^ ((thread_id & k) == 0);
     key = swap ? s_key : key;
     val = swap ? s_val : val;
@@ -468,13 +468,13 @@ bitonic_sort_thread_block_direct(int thread_id, uint64_t* keys_input, V* values_
 
 // End bitonic sort
 
-inline CUDA_CALLABLE int warp_scan_inclusive(int lane, unsigned int ballot_mask)
+inline CUDA_CALLABLE int warp_scan_inclusive(int lane, tile_mask_t ballot_mask)
 {
-    uint32_t mask = ((1u << (lane + 1)) - 1);
-    return __popc(ballot_mask & mask);
+    tile_mask_t mask = (tile_mask_t(1) << (lane + 1)) - 1;
+    return tile_popc(ballot_mask & mask);
 }
 
-inline CUDA_CALLABLE int warp_scan_inclusive(int lane, unsigned int mask, bool thread_contributes_element)
+inline CUDA_CALLABLE int warp_scan_inclusive(int lane, tile_mask_t mask, bool thread_contributes_element)
 {
     return warp_scan_inclusive(lane, __ballot_sync(mask, thread_contributes_element));
 }
@@ -484,7 +484,7 @@ template <typename T> inline CUDA_CALLABLE T warp_scan_inclusive(int lane, T val
 // Computes an inclusive cumulative sum
 #pragma unroll
     for (int i = 1; i <= 32; i *= 2) {
-        auto n = __shfl_up_sync(0xffffffffu, value, i, 32);
+        auto n = __shfl_up_sync(tile_full_mask, value, i, 32);
 
         if (lane >= i)
             value = value + n;
@@ -542,7 +542,7 @@ inline CUDA_CALLABLE void radix_sort_thread_block_core(
 
             for (int b = 0; b < num_scan_buckets; b++) {
                 bool contributes = digit == b;
-                int sum_per_warp = warp_scan_inclusive(lane_id, 0xFFFFFFFF, contributes);
+                int sum_per_warp = warp_scan_inclusive(lane_id, tile_full_mask, contributes);
 
                 if (lane_id == 31)
                     shared_mem[warp_id][b] = sum_per_warp;
@@ -623,7 +623,7 @@ inline CUDA_CALLABLE void radix_sort_thread_block_core(
 
             for (int b = 0; b < num_scan_buckets; b++) {
                 bool contributes = digit == b;
-                int sum_per_warp = warp_scan_inclusive(lane_id, 0xFFFFFFFF, contributes);
+                int sum_per_warp = warp_scan_inclusive(lane_id, tile_full_mask, contributes);
                 if (lane_id == 31)
                     shared_mem[warp_id][b] = sum_per_warp;
 
@@ -644,7 +644,7 @@ inline CUDA_CALLABLE void radix_sort_thread_block_core(
                 }
 
                 int warp_offset = __shfl_sync(
-                    0xFFFFFFFF, inclusive_scan - f, warp_id
+                    tile_full_mask, inclusive_scan - f, warp_id
                 );  //-f because warp_offset needs to be an exclusive scan
 
                 bool contributes = digit == b;

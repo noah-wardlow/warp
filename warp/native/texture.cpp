@@ -348,7 +348,7 @@ bool wp_texture2d_create_device(
 
     result = cuMemcpy2D_f(&copy_params);
     if (result != CUDA_SUCCESS) {
-        cuArrayDestroy_f(cuda_array);
+        check_cu(cuArrayDestroy_f(cuda_array));
         return false;
     }
 
@@ -384,7 +384,7 @@ bool wp_texture2d_create_device(
     CUtexObject tex_object;
     result = cuTexObjectCreate_f(&tex_object, &res_desc, &tex_desc, nullptr);
     if (result != CUDA_SUCCESS) {
-        cuArrayDestroy_f(cuda_array);
+        check_cu(cuArrayDestroy_f(cuda_array));
         return false;
     }
 
@@ -402,11 +402,11 @@ void wp_texture2d_destroy_device(void* context, uint64_t tex_handle, uint64_t ar
     ContextGuard guard(context);
 
     if (tex_handle != 0) {
-        cuTexObjectDestroy_f((CUtexObject)tex_handle);
+        check_cu(cuTexObjectDestroy_f((CUtexObject)tex_handle));
     }
 
     if (array_handle != 0) {
-        cuArrayDestroy_f((CUarray)array_handle);
+        check_cu(cuArrayDestroy_f((CUarray)array_handle));
     }
 }
 
@@ -486,7 +486,7 @@ bool wp_texture3d_create_device(
 
     result = cuMemcpy3D_f(&copy_params);
     if (result != CUDA_SUCCESS) {
-        cuArrayDestroy_f(cuda_array);
+        check_cu(cuArrayDestroy_f(cuda_array));
         return false;
     }
 
@@ -522,7 +522,7 @@ bool wp_texture3d_create_device(
     CUtexObject tex_object;
     result = cuTexObjectCreate_f(&tex_object, &res_desc, &tex_desc, nullptr);
     if (result != CUDA_SUCCESS) {
-        cuArrayDestroy_f(cuda_array);
+        check_cu(cuArrayDestroy_f(cuda_array));
         return false;
     }
 
@@ -540,11 +540,11 @@ void wp_texture3d_destroy_device(void* context, uint64_t tex_handle, uint64_t ar
     ContextGuard guard(context);
 
     if (tex_handle != 0) {
-        cuTexObjectDestroy_f((CUtexObject)tex_handle);
+        check_cu(cuTexObjectDestroy_f((CUtexObject)tex_handle));
     }
 
     if (array_handle != 0) {
-        cuArrayDestroy_f((CUarray)array_handle);
+        check_cu(cuArrayDestroy_f((CUarray)array_handle));
     }
 }
 

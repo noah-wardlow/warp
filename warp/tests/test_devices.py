@@ -87,14 +87,12 @@ class TestDevices(unittest.TestCase):
 
     def test_devices_get_cuda_supported_archs(self):
         if not wp.is_cuda_available():
-            self.assertEqual(wp.get_cuda_supported_archs(), [], "Should return empty list when CUDA is not available")
+            self.assertEqual(
+                wp.get_cuda_supported_archs(), [], "Should return empty list when CUDA/HIP is not available"
+            )
         else:
             archs = wp.get_cuda_supported_archs()
-            self.assertTrue(len(archs) > 0, "No CUDA supported architectures found")
-
-            # Check all elements are integers
-            for arch in archs:
-                self.assertIsInstance(arch, int, f"Architecture value {arch} should be an integer")
+            self.assertTrue(len(archs) > 0, "No CUDA/HIP supported architectures found")
 
             # Check the list is sorted
             self.assertEqual(archs, sorted(archs), "Architecture list should be sorted")
@@ -102,10 +100,17 @@ class TestDevices(unittest.TestCase):
             # Check for no duplicates
             self.assertEqual(len(archs), len(set(archs)), "Architecture list should not contain duplicates")
 
-            # Check values are reasonable (modern CUDA architectures are >= 50)
-            for arch in archs:
-                self.assertGreaterEqual(arch, 50, f"Architecture {arch} should be >= 50 (e.g., sm_50)")
-                self.assertLessEqual(arch, 150, f"Architecture {arch} seems unreasonably high")
+            if isinstance(archs[0], str):
+                # HIP arch strings (e.g., gfx942)
+                for arch in archs:
+                    self.assertIsInstance(arch, str, f"Architecture value {arch} should be a string")
+                    self.assertRegex(arch, r"^gfx\\d+", f"Architecture {arch} should look like a gfx target")
+            else:
+                # CUDA arch integers (e.g., 75 for sm_75)
+                for arch in archs:
+                    self.assertIsInstance(arch, int, f"Architecture value {arch} should be an integer")
+                    self.assertGreaterEqual(arch, 50, f"Architecture {arch} should be >= 50 (e.g., sm_50)")
+                    self.assertLessEqual(arch, 150, f"Architecture {arch} seems unreasonably high")
 
 
 add_function_test(
