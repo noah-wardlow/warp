@@ -104,7 +104,7 @@ class TestDevices(unittest.TestCase):
                 # HIP arch strings (e.g., gfx942)
                 for arch in archs:
                     self.assertIsInstance(arch, str, f"Architecture value {arch} should be a string")
-                    self.assertRegex(arch, r"^gfx\\d+", f"Architecture {arch} should look like a gfx target")
+                    self.assertRegex(arch, r"^gfx\d+", f"Architecture {arch} should look like a gfx target")
             else:
                 # CUDA arch integers (e.g., 75 for sm_75)
                 for arch in archs:

@@ -32,6 +32,13 @@
 #define __restrict__ __restrict
 #endif
 
+// NVRTC has --restrict flag which is not available on HIPRTC.
+#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
+#define WP_RESTRICT __restrict__
+#else
+#define WP_RESTRICT
+#endif
+
 #if !defined(__CUDACC__) && !defined(__HIPCC__)
 #define CUDA_CALLABLE
 #define CUDA_CALLABLE_DEVICE
@@ -1609,6 +1616,22 @@ template <> inline CUDA_CALLABLE double atomic_min(double* address, double val)
 #endif
 }
 
+// HIP does not provide atomicMin overloads for signed long..
+// Add an explicit specialization to use long long.
+#if defined(__HIPCC__)
+template <> inline CUDA_CALLABLE long atomic_min(long* address, long val)
+{
+#if defined(__HIP_DEVICE_COMPILE__)
+    static_assert(sizeof(long) == sizeof(long long), "long and long long must be the same size");
+    return static_cast<long>(atomicMin(reinterpret_cast<long long*>(address), static_cast<long long>(val)));
+#else
+    long old = *address;
+    *address = min(old, val);
+    return old;
+#endif
+}
+#endif  // __HIPCC__
+
 template <typename T> inline CUDA_CALLABLE T atomic_max(T* address, T val)
 {
 #if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
@@ -1671,6 +1694,22 @@ template <> inline CUDA_CALLABLE double atomic_max(double* address, double val)
     return old;
 #endif
 }
+
+// HIP does not provide atomicMax overloads for signed long..
+// Add an explicit specialization to use long long.
+#if defined(__HIPCC__)
+template <> inline CUDA_CALLABLE long atomic_max(long* address, long val)
+{
+#if defined(__HIP_DEVICE_COMPILE__)
+    static_assert(sizeof(long) == sizeof(long long), "long and long long must be the same size");
+    return static_cast<long>(atomicMax(reinterpret_cast<long long*>(address), static_cast<long long>(val)));
+#else
+    long old = *address;
+    *address = max(old, val);
+    return old;
+#endif
+}
+#endif  // __HIPCC__
 
 // default behavior for adjoint of atomic min/max operation that accumulates gradients for all elements matching the
 // min/max value

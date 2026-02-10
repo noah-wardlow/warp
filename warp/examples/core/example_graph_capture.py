@@ -76,6 +76,8 @@ class Example:
             with wp.ScopedCapture() as capture:
                 self.fbm()
             self.graph = capture.graph
+            if self.graph is None:
+                self.use_cuda_graph = False  # Graph capture is disabled on HIP.
 
     def fbm(self):
         for _ in range(16):

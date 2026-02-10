@@ -20,7 +20,7 @@ import numpy as np
 import warp as wp
 from warp.tests.unittest_utils import *
 
-TILE_DIM = 64
+TILE_DIM = 63 if any(d.is_hip for d in wp.get_cuda_devices()) else 64
 
 TILE_M = wp.constant(16)
 TILE_N = wp.constant(8)

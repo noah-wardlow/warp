@@ -25,17 +25,21 @@
 #pragma clang diagnostic ignored "-Wc++17-extensions"
 #endif  // __clang__
 
+#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
+#define WP_TILE_WARP_SIZE 64
+#else
 #define WP_TILE_WARP_SIZE 32
+#endif
 
 namespace wp {
 
 
-template <typename T> int argmax_tracker(T champion_value, T current_value, int champion_index, int current_index)
+template <typename T> CUDA_CALLABLE int argmax_tracker(T champion_value, T current_value, int champion_index, int current_index)
 {
     return current_value > champion_value ? current_index : champion_index;
 }
 
-template <typename T> int argmin_tracker(T champion_value, T current_value, int champion_index, int current_index)
+template <typename T> CUDA_CALLABLE int argmin_tracker(T champion_value, T current_value, int champion_index, int current_index)
 {
     return current_value < champion_value ? current_index : champion_index;
 }
@@ -241,7 +245,7 @@ template <typename Tile, typename Op> CUDA_CALLABLE_DEVICE auto tile_reduce_impl
             output.data[0] = block_sum;
     } else {
         // multi-warp path: cross-warp reduction via shared memory
-        __shared__ T partials[warp_count];
+        WP_TILE_SHARED_ARRAY(T, partials, warp_count);
         __shared__ int active_warps;
 
         if (threadIdx.x == 0)
@@ -273,7 +277,7 @@ template <int Axis, typename Op, typename Tile> CUDA_CALLABLE_DEVICE auto tile_r
     }
 
     // shared memory buffer for the output (used by all tiers)
-    __shared__ T output_buffer[output_size];
+    WP_TILE_SHARED_ARRAY(T, output_buffer, output_size);
 
     // create output layout for coordinate conversion (used by all tiers)
     using OutputLayout = tile_layout_strided_t<OutputShape>;
@@ -306,18 +310,22 @@ template <int Axis, typename Op, typename Tile> CUDA_CALLABLE_DEVICE auto tile_r
         const int warp_index = threadIdx.x / WP_TILE_WARP_SIZE;
         const int lane_index = threadIdx.x % WP_TILE_WARP_SIZE;
 
-        constexpr int chunks_per_slice = (reduce_dim_size + WP_TILE_WARP_SIZE - 1) / WP_TILE_WARP_SIZE;
+        // When block_dim < warp_size (e.g. 32 threads on a 64-wide HIP
+        // wavefront), only block_dim lanes are active per chunk.
+        constexpr int lanes_per_chunk = WP_TILE_BLOCK_DIM < WP_TILE_WARP_SIZE
+                                            ? WP_TILE_BLOCK_DIM : WP_TILE_WARP_SIZE;
+        constexpr int chunks_per_slice = (reduce_dim_size + lanes_per_chunk - 1) / lanes_per_chunk;
 
         // shared memory: one accumulator per warp
-        __shared__ T warp_partials[warp_count];
+        WP_TILE_SHARED_ARRAY(T, warp_partials, warp_count);
 
         // each warp processes output slices
         for (int out_idx = warp_index; out_idx < output_size; out_idx += warp_count) {
             auto out_coord = OutputLayout::coord_from_linear(out_idx);
 
-            // process the reduction axis in chunks of 32
+            // process the reduction axis in chunks of lanes_per_chunk
             for (int chunk = 0; chunk < chunks_per_slice; ++chunk) {
-                int axis_idx = chunk * WP_TILE_WARP_SIZE + lane_index;
+                int axis_idx = chunk * lanes_per_chunk + lane_index;
                 bool valid = axis_idx < reduce_dim_size;
 
                 T val;
@@ -351,7 +359,7 @@ template <int Axis, typename Op, typename Tile> CUDA_CALLABLE_DEVICE auto tile_r
         constexpr int warp_count = (WP_TILE_BLOCK_DIM + WP_TILE_WARP_SIZE - 1) / WP_TILE_WARP_SIZE;
 
         // shared memory for cross-warp reduction (only needed for multi-warp)
-        __shared__ T partials[warp_count];
+        WP_TILE_SHARED_ARRAY(T, partials, warp_count);
         __shared__ int active_warps;
 
         // process each output element sequentially with full block cooperation
@@ -459,7 +467,7 @@ CUDA_CALLABLE_DEVICE auto tile_arg_reduce_impl(Op f, OpTrack track, Tile& t)
     ValueAndIndex<T> warp_sum = warp_reduce_tracked(thread_sum, champion_index, f, track, mask);
 
     // fixed size scratch pad for partial results in shared memory
-    __shared__ T partials[warp_count];
+    WP_TILE_SHARED_ARRAY(T, partials, warp_count);
     __shared__ int partials_idx[warp_count];
 
     // count of active warps
@@ -604,12 +612,12 @@ template <typename Tile, typename Op, typename OpTrack> auto tile_arg_reduce_imp
 
 #endif  // !defined(__CUDA_ARCH__)
 
-inline void adj_tile_reduce_impl()
+inline CUDA_CALLABLE void adj_tile_reduce_impl()
 {
     // todo: general purpose reduction gradients not implemented
 }
 
-inline void adj_tile_reduce_axis_impl()
+inline CUDA_CALLABLE void adj_tile_reduce_axis_impl()
 {
     // todo: axis-specific reduction gradients not implemented
 }
@@ -628,7 +636,7 @@ inline void adj_tile_reduce_axis_impl()
 // convenience methods for specific reductions
 
 // whole-tile sum
-template <typename Tile> auto tile_sum(Tile& t) { return tile_reduce(add, t); }
+template <typename Tile> inline CUDA_CALLABLE auto tile_sum(Tile& t) { return tile_reduce(add, t); }
 
 // special case adjoint for summation
 template <typename Tile, typename AdjTile> CUDA_CALLABLE void adj_tile_sum(Tile& t, Tile& adj_t, AdjTile& adj_ret)
@@ -641,7 +649,7 @@ template <typename Tile, typename AdjTile> CUDA_CALLABLE void adj_tile_sum(Tile&
     T scratch = adj_reg.data[0];
 #else
     // broadcast incoming adjoint to block
-    __shared__ T scratch;
+    WP_TILE_SHARED_VAR(T, scratch);
     if (WP_TILE_THREAD_IDX == 0)
         scratch = adj_reg.data[0];
 
@@ -657,13 +665,13 @@ template <typename Tile, typename AdjTile> CUDA_CALLABLE void adj_tile_sum(Tile&
 }
 
 // axis-specific sum
-template <int Axis, typename Tile> auto tile_sum(Tile& t)
+template <int Axis, typename Tile> inline CUDA_CALLABLE auto tile_sum(Tile& t)
 {
     return tile_reduce_axis_impl<Axis>([](auto x, auto y) { return add(x, y); }, t);
 }
 
 // special case adjoint for axis-specific summation
-template <int Axis, typename Tile, typename AdjTile> void adj_tile_sum(Tile& t, Tile& adj_t, AdjTile& adj_ret)
+template <int Axis, typename Tile, typename AdjTile> inline CUDA_CALLABLE void adj_tile_sum(Tile& t, Tile& adj_t, AdjTile& adj_ret)
 {
     using InputShape = typename Tile::Layout::Shape;
 
@@ -736,31 +744,31 @@ template <int Axis, typename Tile, typename AdjTile> void adj_tile_sum(Tile& t, 
     }
 }
 
-template <typename Tile> auto tile_max(Tile& t) { return tile_reduce(max, t); }
+template <typename Tile> inline CUDA_CALLABLE auto tile_max(Tile& t) { return tile_reduce(max, t); }
 
-template <typename Tile, typename AdjTile> void adj_tile_max(Tile& t, Tile& adj_t, AdjTile& adj_ret)
+template <typename Tile, typename AdjTile> inline CUDA_CALLABLE void adj_tile_max(Tile& t, Tile& adj_t, AdjTile& adj_ret)
 {
     // todo: not implemented
 }
 
-template <typename Tile> auto tile_min(Tile& t) { return tile_reduce(min, t); }
+template <typename Tile> inline CUDA_CALLABLE auto tile_min(Tile& t) { return tile_reduce(min, t); }
 
-template <typename Tile, typename AdjTile> void adj_tile_min(Tile& t, Tile& adj_t, AdjTile& adj_ret)
+template <typename Tile, typename AdjTile> inline CUDA_CALLABLE void adj_tile_min(Tile& t, Tile& adj_t, AdjTile& adj_ret)
 {
     // todo: not implemented
 }
 
 
-template <typename Tile> auto tile_argmax(Tile& t) { return tile_arg_reduce(max, argmax_tracker, t); }
+template <typename Tile> inline CUDA_CALLABLE auto tile_argmax(Tile& t) { return tile_arg_reduce(max, argmax_tracker, t); }
 
-template <typename Tile, typename AdjTile> void adj_tile_argmax(Tile& t, Tile& adj_t, AdjTile& adj_ret)
+template <typename Tile, typename AdjTile> inline CUDA_CALLABLE void adj_tile_argmax(Tile& t, Tile& adj_t, AdjTile& adj_ret)
 {
     // todo: not implemented
 }
 
-template <typename Tile> auto tile_argmin(Tile& t) { return tile_arg_reduce(min, argmin_tracker, t); }
+template <typename Tile> inline CUDA_CALLABLE auto tile_argmin(Tile& t) { return tile_arg_reduce(min, argmin_tracker, t); }
 
-template <typename Tile, typename AdjTile> void adj_tile_argmin(Tile& t, Tile& adj_t, AdjTile& adj_ret)
+template <typename Tile, typename AdjTile> inline CUDA_CALLABLE void adj_tile_argmin(Tile& t, Tile& adj_t, AdjTile& adj_ret)
 {
     // todo: not implemented
 }

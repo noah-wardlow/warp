@@ -208,42 +208,47 @@ class Example:
         output = create_array(IMG_WIDTH * IMG_HEIGHT, DIM_OUT)
 
         # capture graph for whole epoch
-        wp.capture_begin()
+        # Graph capture is disabled on HIP.
+        def run_epoch():
+            for b in range(0, IMG_WIDTH * IMG_HEIGHT, BATCH_SIZE):
+                loss.zero_()
 
-        for b in range(0, IMG_WIDTH * IMG_HEIGHT, BATCH_SIZE):
-            loss.zero_()
+                with wp.Tape() as tape:
+                    wp.launch(
+                        compute,
+                        dim=[BATCH_SIZE],
+                        inputs=[
+                            self.indices[b : b + BATCH_SIZE],
+                            self.weights_0,
+                            self.bias_0,
+                            self.weights_1,
+                            self.bias_1,
+                            self.weights_2,
+                            self.bias_2,
+                            self.weights_3,
+                            self.bias_3,
+                            self.reference,
+                            loss,
+                            None,
+                        ],
+                        block_dim=NUM_THREADS,
+                    )
 
-            with wp.Tape() as tape:
-                wp.launch(
-                    compute,
-                    dim=[BATCH_SIZE],
-                    inputs=[
-                        self.indices[b : b + BATCH_SIZE],
-                        self.weights_0,
-                        self.bias_0,
-                        self.weights_1,
-                        self.bias_1,
-                        self.weights_2,
-                        self.bias_2,
-                        self.weights_3,
-                        self.bias_3,
-                        self.reference,
-                        loss,
-                        None,
-                    ],
-                    block_dim=NUM_THREADS,
-                )
+                tape.backward(loss)
+                optimizer.step(optimizer_grads)
+                tape.zero()
 
-            tape.backward(loss)
-            optimizer.step(optimizer_grads)
-            tape.zero()
-
-        graph = wp.capture_end()
+        with wp.ScopedCapture() as capture:
+            run_epoch()
+        graph = capture.graph
 
         with wp.ScopedTimer("Training"):
             for i in range(self.max_epochs):
                 with wp.ScopedTimer("Epoch"):
-                    wp.capture_launch(graph)
+                    if graph is not None:
+                        wp.capture_launch(graph)
+                    else:
+                        run_epoch()
                     print(f"Epoch: {i} Loss: {loss.numpy()}")
 
         # evaluate full image

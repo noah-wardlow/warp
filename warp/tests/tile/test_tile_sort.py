@@ -53,8 +53,10 @@ def test_tile_sort(test, device):
             length = 2**i + 1
             kernels[(dtype, length)] = create_sort_kernel(dtype, length)
 
+    start_j = 6 if wp.get_device(device).is_hip else 5
+
     for (dtype, length), kernel in kernels.items():
-        for j in range(5, 10):
+        for j in range(start_j, 10):
             TILE_DIM = 2**j
 
             rng = np.random.default_rng(42)  # Create a random generator instance

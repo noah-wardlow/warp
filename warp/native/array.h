@@ -19,6 +19,15 @@
 
 #include "builtin.h"
 
+// Fallback for standalone inclusion paths; normally defined in builtin.h.
+#ifndef WP_RESTRICT
+#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
+#define WP_RESTRICT __restrict__
+#else
+#define WP_RESTRICT
+#endif
+#endif
+
 namespace wp {
 
 #if FP_CHECK
@@ -265,8 +274,8 @@ template <typename T> struct array_t {
 
     CUDA_CALLABLE inline bool empty() const { return !data; }
 
-    T* data;
-    T* grad;
+    T* WP_RESTRICT data;
+    T* WP_RESTRICT grad;
     shape_t shape;
     int strides[ARRAY_MAX_DIMS];
     int ndim;

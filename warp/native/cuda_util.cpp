@@ -425,11 +425,6 @@ bool check_cu_result(CUresult result, const char* func, const char* file, int li
 
 bool get_capture_dependencies(CUstream stream, std::vector<CUgraphNode>& dependencies_ret)
 {
-#if defined(__HIP_PLATFORM_AMD__)
-    (void)stream;
-    dependencies_ret.clear();
-    return false;
-#else
     CUstreamCaptureStatus status;
     size_t num_dependencies = 0;
     const CUgraphNode* dependencies = NULL;
@@ -440,16 +435,10 @@ bool get_capture_dependencies(CUstream stream, std::vector<CUgraphNode>& depende
         return true;
     }
     return false;
-#endif  // defined(__HIP_PLATFORM_AMD__)
 }
 
 bool get_graph_leaf_nodes(cudaGraph_t graph, std::vector<cudaGraphNode_t>& leaf_nodes_ret)
 {
-#if defined(__HIP_PLATFORM_AMD__)
-    (void)graph;
-    leaf_nodes_ret.clear();
-    return false;
-#else
     if (!graph)
         return false;
 
@@ -474,7 +463,6 @@ bool get_graph_leaf_nodes(cudaGraph_t graph, std::vector<cudaGraphNode_t>& leaf_
     }
 
     return true;
-#endif  // defined(__HIP_PLATFORM_AMD__)
 }
 
 
@@ -887,13 +875,8 @@ CUresult cuStreamGetCaptureInfo_f(
 )
 {
 #if defined(__HIP_PLATFORM_AMD__)
-    (void)stream;
-    (void)captureStatus_out;
-    (void)id_out;
-    (void)graph_out;
-    (void)dependencies_out;
-    (void)numDependencies_out;
-    return CUDA_ERROR_NOT_SUPPORTED;
+    return hipStreamGetCaptureInfo_v2(stream, captureStatus_out,
+        reinterpret_cast<unsigned long long*>(id_out), graph_out, dependencies_out, numDependencies_out);
 #else
     return pfn_cuStreamGetCaptureInfo
         ? pfn_cuStreamGetCaptureInfo(
@@ -908,11 +891,7 @@ CUresult cuStreamUpdateCaptureDependencies_f(
 )
 {
 #if defined(__HIP_PLATFORM_AMD__)
-    (void)stream;
-    (void)dependencies;
-    (void)numDependencies;
-    (void)flags;
-    return CUDA_ERROR_NOT_SUPPORTED;
+    return hipStreamUpdateCaptureDependencies(stream, dependencies, numDependencies, flags);
 #else
     return pfn_cuStreamUpdateCaptureDependencies
         ? pfn_cuStreamUpdateCaptureDependencies(stream, dependencies, numDependencies, flags)
@@ -1023,10 +1002,7 @@ CUresult cuGraphAddNode_f(
 CUresult cuGraphNodeGetDependentNodes_f(CUgraphNode hNode, CUgraphNode* dependentNodes, size_t* numDependentNodes)
 {
 #if defined(__HIP_PLATFORM_AMD__)
-    (void)hNode;
-    (void)dependentNodes;
-    (void)numDependentNodes;
-    return CUDA_ERROR_NOT_SUPPORTED;
+    return hipGraphNodeGetDependentNodes(hNode, dependentNodes, numDependentNodes);
 #else
     return pfn_cuGraphNodeGetDependentNodes ? pfn_cuGraphNodeGetDependentNodes(hNode, dependentNodes, numDependentNodes)
                                             : DRIVER_ENTRY_POINT_ERROR;
@@ -1036,9 +1012,7 @@ CUresult cuGraphNodeGetDependentNodes_f(CUgraphNode hNode, CUgraphNode* dependen
 CUresult cuGraphNodeGetType_f(CUgraphNode hNode, CUgraphNodeType* type)
 {
 #if defined(__HIP_PLATFORM_AMD__)
-    (void)hNode;
-    (void)type;
-    return CUDA_ERROR_NOT_SUPPORTED;
+    return hipGraphNodeGetType(hNode, type);
 #else
     return pfn_cuGraphNodeGetType ? pfn_cuGraphNodeGetType(hNode, type) : DRIVER_ENTRY_POINT_ERROR;
 #endif  // defined(__HIP_PLATFORM_AMD__)
@@ -1262,6 +1236,11 @@ CUresult cuIpcCloseMemHandle_f(CUdeviceptr dptr)
 CUresult cuArrayCreate_f(CUarray* pHandle, const CUDA_ARRAY_DESCRIPTOR* pAllocateArray)
 {
 #if defined(__HIP_PLATFORM_AMD__)
+    // On some CDNA targets (notably gfx94x/gfx95x builds), HIP exposes texture APIs but
+    // marks image support as unavailable via __HIP_NO_IMAGE_SUPPORT.
+#if defined(__HIP_NO_IMAGE_SUPPORT)
+    return CUDA_ERROR_NOT_SUPPORTED;
+#endif
     return hipArrayCreate(pHandle, pAllocateArray);
 #else
     return pfn_cuArrayCreate ? pfn_cuArrayCreate(pHandle, pAllocateArray) : DRIVER_ENTRY_POINT_ERROR;
@@ -1280,6 +1259,11 @@ CUresult cuArrayDestroy_f(CUarray hArray)
 CUresult cuArray3DCreate_f(CUarray* pHandle, const CUDA_ARRAY3D_DESCRIPTOR* pAllocateArray)
 {
 #if defined(__HIP_PLATFORM_AMD__)
+    // On some CDNA targets (notably gfx94x/gfx95x builds), HIP exposes texture APIs but
+    // marks image support as unavailable via __HIP_NO_IMAGE_SUPPORT.
+#if defined(__HIP_NO_IMAGE_SUPPORT)
+    return CUDA_ERROR_NOT_SUPPORTED;
+#endif
     return hipArray3DCreate(pHandle, pAllocateArray);
 #else
     return pfn_cuArray3DCreate ? pfn_cuArray3DCreate(pHandle, pAllocateArray) : DRIVER_ENTRY_POINT_ERROR;

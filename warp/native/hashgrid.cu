@@ -36,7 +36,9 @@ __global__ void compute_cell_indices(HashGrid grid, wp::array_t<wp::vec3> points
     }
 }
 
-__global__ void compute_cell_offsets(int* cell_starts, int* cell_ends, const int* point_cells, int num_points)
+__global__ void compute_cell_offsets(
+    int* WP_RESTRICT cell_starts, int* WP_RESTRICT cell_ends, const int* WP_RESTRICT point_cells, int num_points
+)
 {
     const int tid = blockIdx.x * blockDim.x + threadIdx.x;
 

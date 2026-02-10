@@ -266,6 +266,14 @@ static std::unordered_map<uint64_t, CaptureInfo*> g_captures;
 // See wp_alloc_device_async() and wp_free_device_async().
 static std::unordered_map<void*, GraphAllocInfo> g_graph_allocs;
 
+#if defined(__HIP_PLATFORM_AMD__)
+// Track allocation stream for each mempool allocation so that
+// wp_free_device_async can create proper inter-stream dependencies.
+// On CUDA, cudaFreeAsync(ptr, NULL) provides this implicitly via
+// the legacy null stream; HIP requires explicit event dependencies.
+static std::unordered_map<void*, CUstream> g_alloc_streams;
+#endif
+
 // Memory that cannot be freed immediately gets queued here.
 // Call free_deferred_allocs() to release.
 static std::vector<FreeInfo> g_deferred_free_list;
@@ -428,11 +436,13 @@ static ContextInfo* get_context_info(CUcontext ctx)
             DeviceInfo* device_info = g_device_map[device];
 
             // workaround for https://nvbugspro.nvidia.com/bug/4456003
+#if !defined(__HIP_PLATFORM_AMD__)
             if (device_info->is_mempool_supported) {
                 void* dummy = NULL;
                 check_cuda(cudaMallocAsync(&dummy, 1, NULL));
                 check_cuda(cudaFreeAsync(dummy, NULL));
             }
+#endif
 
             ContextInfo context_info;
             context_info.device_info = device_info;
@@ -591,7 +601,29 @@ static int free_deferred_allocs(void* context = NULL)
 
             if (free_info.is_async) {
                 // this could be a regular stream-ordered allocation or a graph allocation
+#if defined(__HIP_PLATFORM_AMD__)
+                ContextInfo* ci = get_context_info(free_info.context);
+                CUstream free_stream = ci ? ci->stream : NULL;
+
+                // Apply the same cross-stream event dependency as wp_free_device_async
+                // to match CUDA's implicit null-stream synchronization semantics.
+                auto alloc_it = g_alloc_streams.find(free_info.ptr);
+                if (alloc_it != g_alloc_streams.end()) {
+                    CUstream alloc_stream = alloc_it->second;
+                    if (alloc_stream != free_stream && alloc_stream != NULL) {
+                        StreamInfo* alloc_si = get_stream_info(alloc_stream);
+                        if (alloc_si && alloc_si->cached_event) {
+                            check_cu(cuEventRecord_f(alloc_si->cached_event, alloc_stream));
+                            check_cu(cuStreamWaitEvent_f(free_stream, alloc_si->cached_event,
+                                                         CU_EVENT_WAIT_DEFAULT));
+                        }
+                    }
+                    g_alloc_streams.erase(alloc_it);
+                }
+                cudaError_t res = cudaFreeAsync(free_info.ptr, free_stream);
+#else
                 cudaError_t res = cudaFreeAsync(free_info.ptr, NULL);
+#endif
                 if (res != cudaSuccess) {
                     if (res == cudaErrorInvalidValue) {
                         // This can happen if we try to release the pointer but the graph was
@@ -792,6 +824,11 @@ void wp_free_device_default(void* context, void* ptr)
 {
     ContextGuard guard(context);
 
+#if defined(__HIP_PLATFORM_AMD__)
+    // Clean up alloc tracking in case async-allocated memory is freed via the default path
+    g_alloc_streams.erase(ptr);
+#endif
+
     // check if a capture is in progress
     if (g_captures.empty()) {
         check_cuda(cudaFree(ptr));
@@ -832,6 +869,12 @@ void* wp_alloc_device_async(void* context, size_t s)
                 g_graph_allocs[ptr] = alloc_info;
             }
         }
+#if defined(__HIP_PLATFORM_AMD__)
+        else {
+            // Track the allocation stream for cross-stream free safety
+            g_alloc_streams[ptr] = stream;
+        }
+#endif
     }
 
     return ptr;
@@ -857,7 +900,34 @@ void wp_free_device_async(void* context, void* ptr)
             // cudaFreeAsync on the null stream does not block or trigger synchronization, but it postpones
             // the deallocation until a synchronization point is reached, so preceding work on this pointer
             // should safely complete.
+#if defined(__HIP_PLATFORM_AMD__)
+            {
+                ContextInfo* ci = get_context_info(context);
+                CUstream free_stream = ci ? ci->stream : NULL;
+
+                // Look up the stream this pointer was allocated on.
+                // If freeing on a different stream, create an event dependency
+                // so the free waits for all prior work on the allocation stream.
+                // This replicates CUDA's implicit null-stream cross-stream
+                // synchronization that cudaFreeAsync(ptr, NULL) provides.
+                auto it = g_alloc_streams.find(ptr);
+                if (it != g_alloc_streams.end()) {
+                    CUstream alloc_stream = it->second;
+                    if (alloc_stream != free_stream && alloc_stream != NULL) {
+                        StreamInfo* alloc_info = get_stream_info(alloc_stream);
+                        if (alloc_info && alloc_info->cached_event) {
+                            check_cu(cuEventRecord_f(alloc_info->cached_event, alloc_stream));
+                            check_cu(cuStreamWaitEvent_f(free_stream, alloc_info->cached_event,
+                                                         CU_EVENT_WAIT_DEFAULT));
+                        }
+                    }
+                    g_alloc_streams.erase(it);
+                }
+                check_cuda(cudaFreeAsync(ptr, free_stream));
+            }
+#else
             check_cuda(cudaFreeAsync(ptr, NULL));
+#endif
         } else {
             // We must defer the free operation until graph capture completes.
             deferred_free(ptr, context, true);
@@ -871,6 +941,17 @@ void wp_free_device_async(void* context, void* ptr)
         // check if the capture is still active
         auto capture_iter = g_captures.find(capture_id);
         if (capture_iter != g_captures.end()) {
+#if defined(__HIP_PLATFORM_AMD__)
+            // hipGraphAddMemFreeNode rejects pointers from hipMallocAsync during
+            // stream capture (hipErrorInvalidValue). It only accepts pointers from
+            // hipGraphAddMemAllocNode on explicitly constructed graphs.
+            // Use hipFreeAsync on the capturing stream instead, the stream capture
+            // mechanism records it as a proper free node in the graph.
+            {
+                CaptureInfo* capture = capture_iter->second;
+                check_cuda(cudaFreeAsync(ptr, capture->stream));
+            }
+#else
             // Add a mem free node.  Use all current leaf nodes as dependencies to ensure that all prior
             // work completes before deallocating.  This works with both Warp-initiated and external captures
             // and avoids the need to explicitly track all streams used during the capture.
@@ -885,7 +966,7 @@ void wp_free_device_async(void* context, void* ptr)
                     ));
                 }
             }
-
+#endif
             // we're done with this allocation, it's owned by the graph
             g_graph_allocs.erase(alloc_iter);
         } else {
@@ -894,7 +975,28 @@ void wp_free_device_async(void* context, void* ptr)
             if (alloc_info.graph_destroyed) {
                 if (g_captures.empty()) {
                     // try to free the pointer now
+#if defined(__HIP_PLATFORM_AMD__)
+                    ContextInfo* ci = get_context_info(context);
+                    CUstream free_stream = ci ? ci->stream : NULL;
+
+                    // Apply cross-stream event dependency for CUDA null-stream parity
+                    auto alloc_it = g_alloc_streams.find(ptr);
+                    if (alloc_it != g_alloc_streams.end()) {
+                        CUstream alloc_stream = alloc_it->second;
+                        if (alloc_stream != free_stream && alloc_stream != NULL) {
+                            StreamInfo* alloc_si = get_stream_info(alloc_stream);
+                            if (alloc_si && alloc_si->cached_event) {
+                                check_cu(cuEventRecord_f(alloc_si->cached_event, alloc_stream));
+                                check_cu(cuStreamWaitEvent_f(free_stream, alloc_si->cached_event,
+                                                             CU_EVENT_WAIT_DEFAULT));
+                            }
+                        }
+                        g_alloc_streams.erase(alloc_it);
+                    }
+                    cudaError_t res = cudaFreeAsync(ptr, free_stream);
+#else
                     cudaError_t res = cudaFreeAsync(ptr, NULL);
+#endif
                     if (res == cudaErrorInvalidValue) {
                         // This can happen if we try to release the pointer but the graph was
                         // never launched, so the memory isn't mapped.
@@ -3800,7 +3902,6 @@ size_t wp_cuda_compile_program(
 )
 {
 #if defined(__HIP_PLATFORM_AMD__)
-    (void)verify_fp;
     (void)ltoirs;
     (void)ltoir_sizes;
     (void)ltoir_input_types;
@@ -3827,7 +3928,7 @@ size_t wp_cuda_compile_program(
     std::vector<const char*> opts;
 
     // Reserve enough space to prevent vector reallocation which would invalidate c_str() pointers
-    stored_options.reserve(8 + num_cuda_include_dirs);
+    stored_options.reserve(32 + num_cuda_include_dirs);
 
     if (arch && arch[0]) {
         stored_options.push_back(std::string("--gpu-architecture=") + arch);
@@ -3854,18 +3955,61 @@ size_t wp_cuda_compile_program(
         opts.push_back(stored_options.back().c_str());
         stored_options.push_back("-g");
         opts.push_back(stored_options.back().c_str());
-    } else if (optimization_level >= 0) {
-        stored_options.push_back(std::string("-O") + std::to_string(optimization_level));
+        stored_options.push_back("-D_DEBUG");
+        opts.push_back(stored_options.back().c_str());
+    } else {
+        if (optimization_level >= 0) {
+            stored_options.push_back(std::string("-O") + std::to_string(optimization_level));
+            opts.push_back(stored_options.back().c_str());
+        }
+        // Match NVRTC: define NDEBUG in release mode
+        stored_options.push_back("-DNDEBUG");
+        opts.push_back(stored_options.back().c_str());
+    }
+
+    // Match NVRTC: define WP_ENABLE_MATHDX (always 0 on HIP)
+    stored_options.push_back("-DWP_ENABLE_MATHDX=0");
+    opts.push_back(stored_options.back().c_str());
+
+    if (verify_fp) {
+        stored_options.push_back("-DWP_VERIFY_FP");
         opts.push_back(stored_options.back().c_str());
     }
 
     if (fast_math) {
         stored_options.push_back("-ffast-math");
         opts.push_back(stored_options.back().c_str());
+        // Match NVRTC --use_fast_math: substitute sinf/cosf/expf/logf etc.
+        // with single-instruction approximate hardware intrinsics.
+        // powf is unaffected (no approximate hardware instruction on CDNA).
+        stored_options.push_back("-fgpu-approx-transcendentals");
+        opts.push_back(stored_options.back().c_str());
+        // Match NVRTC --ftz=true (part of --use_fast_math): flush
+        // single-precision denormals to zero for faster FP execution.
+        stored_options.push_back("-fgpu-flush-denormals-to-zero");
+        opts.push_back(stored_options.back().c_str());
     }
+
+    // Match NVRTC default: strict IEEE 754 floating-point semantics.
+    // These override the dangerous parts of -ffast-math while keeping
+    // the transcendental substitutions from -fgpu-approx-transcendentals.
+    stored_options.push_back("-fno-finite-math-only");   // preserve inf/NaN
+    opts.push_back(stored_options.back().c_str());
+    stored_options.push_back("-fno-associative-math");   // no reordering min/max chains
+    opts.push_back(stored_options.back().c_str());
+    stored_options.push_back("-fno-reciprocal-math");    // no unsafe 1/x transforms
+    opts.push_back(stored_options.back().c_str());
+
+    // Match NVRTC default: safe pointer aliasing for reinterpret_casts
+    stored_options.push_back("-fno-strict-aliasing");
+    opts.push_back(stored_options.back().c_str());
 
     if (fuse_fp) {
         stored_options.push_back("-ffp-contract=fast");
+        opts.push_back(stored_options.back().c_str());
+    } else {
+        // Match NVRTC --fmad=false: disable FMA fusion entirely
+        stored_options.push_back("-ffp-contract=off");
         opts.push_back(stored_options.back().c_str());
     }
 
@@ -3873,6 +4017,12 @@ size_t wp_cuda_compile_program(
         stored_options.push_back("-gline-tables-only");
         opts.push_back(stored_options.back().c_str());
     }
+
+    // Suppress warnings matching NVRTC's --diag-suppress=177,550
+    stored_options.push_back("-Wno-unused-variable");
+    opts.push_back(stored_options.back().c_str());
+    stored_options.push_back("-Wno-unused-but-set-variable");
+    opts.push_back(stored_options.back().c_str());
 
     if (verbose) {
         fprintf(stdout, "HIPRTC options:\n");
@@ -4744,6 +4894,16 @@ size_t wp_cuda_launch_kernel(
     // CUDA specs up to compute capability 9.0 says the max x-dim grid is 2**31-1, so
     // grid_dim is fine as an int for the near future
     int grid_dim = (dim + block_dim - 1) / block_dim;
+
+#if defined(__HIP_PLATFORM_AMD__)
+    // HIP: total work-items (grid_dim * block_dim) must not exceed 2^32-1.
+    // The kernel's grid-stride loop handles the remaining elements.
+    {
+        int hip_max_grid = (int)(0xFFFFFFFFu / (unsigned)block_dim);
+        if (grid_dim > hip_max_grid)
+            grid_dim = hip_max_grid;
+    }
+#endif
 
     if (max_blocks <= 0) {
         max_blocks = 2147483647;

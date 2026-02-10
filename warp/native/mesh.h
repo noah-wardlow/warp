@@ -35,10 +35,10 @@ struct Mesh {
 
     array_t<int> indices;
 
-    vec3* lowers;
-    vec3* uppers;
+    vec3* WP_RESTRICT lowers;
+    vec3* WP_RESTRICT uppers;
 
-    SolidAngleProps* solid_angle_props;
+    SolidAngleProps* WP_RESTRICT solid_angle_props;
 
     int num_points;
     int num_tris;
