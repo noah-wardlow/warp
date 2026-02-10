@@ -439,28 +439,29 @@ def test_cholesky_solver_graph_capture(device):
         # Create a stream for graph capture
         stream = wp.Stream(device)
 
+        # Graph capture is disabled on HIP.
+        def run_body():
+            for n in range(1, max_equations + 1):
+                # Update system size
+                wp.launch(assign_int_kernel, dim=1, inputs=[n_wp, n])
+
+                # Factorize A
+                warp_solver.factorize_dynamic(A_wp, n_wp)
+
+                # Solve system
+                warp_solver.solve(b_wp, x_wp)
+
         with wp.ScopedStream(stream):
-            # Begin graph capture
-            wp.capture_begin()
-            try:
-                # Loop through different system sizes
-                for n in range(1, max_equations + 1):
-                    # Update system size
-                    wp.launch(assign_int_kernel, dim=1, inputs=[n_wp, n])
+            with wp.ScopedCapture() as capture:
+                run_body()
+            graph = capture.graph
 
-                    # Factorize A
-                    warp_solver.factorize_dynamic(A_wp, n_wp)
-
-                    # Solve system
-                    warp_solver.solve(b_wp, x_wp)
-
-            finally:
-                # End graph capture
-                graph = wp.capture_end()
-
-            # Run the captured graph
+            # Run the captured graph (or eager fallback on HIP)
             with wp.ScopedTimer("Launch graph", cuda_filter=wp.TIMING_GRAPH):
-                wp.capture_launch(graph, stream=stream)
+                if graph is not None:
+                    wp.capture_launch(graph, stream=stream)
+                else:
+                    run_body()
 
             wp.synchronize()
 

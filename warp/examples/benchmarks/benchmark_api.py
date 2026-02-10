@@ -83,11 +83,13 @@ wp.force_load(cuda0)
 if cuda_device_count > 1:
     wp.force_load(cuda1)
 
-# capture graph
-with wp.ScopedDevice(cuda0):
-    wp.capture_begin()
-    wp.launch(inc_kernel, dim=arr_cuda0.size, inputs=[arr_cuda0])
-    graph0 = wp.capture_end()
+# Graph capture is disabled on HIP.
+graph0 = None
+if not cuda0.is_hip:
+    with wp.ScopedDevice(cuda0):
+        wp.capture_begin()
+        wp.launch(inc_kernel, dim=arr_cuda0.size, inputs=[arr_cuda0])
+        graph0 = wp.capture_end()
 
 
 g_allocs = [None] * num_runs
@@ -247,6 +249,9 @@ def test_launch_stream(num_elems, device):
 
 
 def test_graph(num_elems, device):
+    if graph0 is None:
+        return 0.0
+
     wp.synchronize()
 
     with wp.ScopedTimer("graph", print=VERBOSE, use_nvtx=USE_NVTX) as timer:
@@ -259,6 +264,9 @@ def test_graph(num_elems, device):
 
 
 def test_graph_stream(num_elems, device):
+    if graph0 is None:
+        return 0.0
+
     wp.synchronize()
 
     with wp.ScopedTimer("graph", print=VERBOSE, use_nvtx=USE_NVTX) as timer:

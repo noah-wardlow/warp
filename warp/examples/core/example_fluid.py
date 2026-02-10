@@ -196,6 +196,8 @@ class Example:
             with wp.ScopedCapture() as capture:
                 self.pressure_iterations()
             self.graph = capture.graph
+            if self.graph is None:
+                self.use_cuda_graph = False  # Graph capture is disabled on HIP.
 
     def step(self):
         with wp.ScopedTimer("step"):

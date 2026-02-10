@@ -20,7 +20,6 @@ import numpy as np
 import warp as wp
 from warp.tests.matrix.utils import (
     get_select_kernel,
-    getkernel,
     np_float_types,
     np_scalar_types,
     randvals,
@@ -28,6 +27,32 @@ from warp.tests.matrix.utils import (
 from warp.tests.unittest_utils import *
 
 kernel_cache = {}
+_hip_unique_module = any(d.is_hip for d in get_selected_cuda_test_devices())
+
+
+def getkernel_hip_safe(cache, func, suffix=""):
+    key = func.__name__ + "_" + suffix
+    if key not in cache:
+        if _hip_unique_module:
+            unique_module = wp._src.context.Module(key, None)
+            cache[key] = wp.Kernel(func=func, key=key, module=unique_module)
+        else:
+            cache[key] = wp.Kernel(func=func, key=key)
+    return cache[key]
+
+
+def get_select_kernel_hip_safe(cache, dtype):
+    if _hip_unique_module:
+        def output_select_kernel_fn(
+            input: wp.array(dtype=dtype),
+            index: int,
+            out: wp.array(dtype=dtype),
+        ):
+            out[0] = input[index]
+
+        return getkernel_hip_safe(cache, output_select_kernel_fn, suffix=dtype.__name__)
+
+    return get_select_kernel(cache, dtype)
 
 
 def test_matvec_multiplication(test, device, dtype, register_kernels=False):
@@ -47,7 +72,7 @@ def test_matvec_multiplication(test, device, dtype, register_kernels=False):
     vec2 = wp._src.types.vector(length=2, dtype=wptype)
     vec4 = wp._src.types.vector(length=4, dtype=wptype)
 
-    output_select_kernel = get_select_kernel(kernel_cache, wptype)
+    output_select_kernel = get_select_kernel_hip_safe(kernel_cache, wptype)
 
     def check_mat_vec_mul(
         v2: wp.array(dtype=vec2),
@@ -92,7 +117,7 @@ def test_matvec_multiplication(test, device, dtype, register_kernels=False):
             outcomponents[idx] = wptype(2) * v32result_2[i]
             idx = idx + 1
 
-    kernel = getkernel(kernel_cache, check_mat_vec_mul, suffix=dtype.__name__)
+    kernel = getkernel_hip_safe(kernel_cache, check_mat_vec_mul, suffix=dtype.__name__)
 
     if register_kernels:
         return
@@ -152,7 +177,7 @@ def test_vecmat_multiplication(test, device, dtype, register_kernels=False):
     vec2 = wp._src.types.vector(length=2, dtype=wptype)
     vec4 = wp._src.types.vector(length=4, dtype=wptype)
 
-    output_select_kernel = get_select_kernel(kernel_cache, wptype)
+    output_select_kernel = get_select_kernel_hip_safe(kernel_cache, wptype)
 
     def check_vec_mat_mul(
         v2: wp.array(dtype=vec2),
@@ -197,7 +222,7 @@ def test_vecmat_multiplication(test, device, dtype, register_kernels=False):
             outcomponents[idx] = wptype(2) * v32result_2[i]
             idx = idx + 1
 
-    kernel = getkernel(kernel_cache, check_vec_mat_mul, suffix=dtype.__name__)
+    kernel = getkernel_hip_safe(kernel_cache, check_vec_mat_mul, suffix=dtype.__name__)
 
     if register_kernels:
         return
@@ -256,7 +281,7 @@ def test_matmat_multiplication(test, device, dtype, register_kernels=False):
     mat32 = wp._src.types.matrix(shape=(3, 2), dtype=wptype)
     mat44 = wp._src.types.matrix(shape=(4, 4), dtype=wptype)
 
-    output_select_kernel = get_select_kernel(kernel_cache, wptype)
+    output_select_kernel = get_select_kernel_hip_safe(kernel_cache, wptype)
 
     def check_mat_mat_mul(
         a2: wp.array(dtype=mat22),
@@ -306,7 +331,7 @@ def test_matmat_multiplication(test, device, dtype, register_kernels=False):
                 outcomponents[idx] = wptype(2) * c32result_2[i, j]
                 idx = idx + 1
 
-    kernel = getkernel(kernel_cache, check_mat_mat_mul, suffix=dtype.__name__)
+    kernel = getkernel_hip_safe(kernel_cache, check_mat_mat_mul, suffix=dtype.__name__)
 
     if register_kernels:
         return
@@ -373,7 +398,7 @@ def test_outer_product(test, device, dtype, register_kernels=False):
     vec4 = wp._src.types.vector(length=4, dtype=wptype)
     vec5 = wp._src.types.vector(length=5, dtype=wptype)
 
-    output_select_kernel = get_select_kernel(kernel_cache, wptype)
+    output_select_kernel = get_select_kernel_hip_safe(kernel_cache, wptype)
 
     def check_mat_outer_product(
         s2: wp.array(dtype=vec2),
@@ -404,7 +429,7 @@ def test_outer_product(test, device, dtype, register_kernels=False):
                 outcomponents[idx] = m25result[i, j]
                 idx = idx + 1
 
-    kernel = getkernel(kernel_cache, check_mat_outer_product, suffix=dtype.__name__)
+    kernel = getkernel_hip_safe(kernel_cache, check_mat_outer_product, suffix=dtype.__name__)
 
     if register_kernels:
         return
@@ -473,7 +498,7 @@ def test_transpose(test, device, dtype, register_kernels=False):
     mat32 = wp._src.types.matrix(shape=(3, 2), dtype=wptype)
     mat44 = wp._src.types.matrix(shape=(4, 4), dtype=wptype)
 
-    output_select_kernel = get_select_kernel(kernel_cache, wptype)
+    output_select_kernel = get_select_kernel_hip_safe(kernel_cache, wptype)
 
     def check_mat_transpose(
         m2: wp.array(dtype=mat22),
@@ -502,7 +527,7 @@ def test_transpose(test, device, dtype, register_kernels=False):
                 outcomponents[idx] = mat32[i, j]
                 idx = idx + 1
 
-    kernel = getkernel(kernel_cache, check_mat_transpose, suffix=dtype.__name__)
+    kernel = getkernel_hip_safe(kernel_cache, check_mat_transpose, suffix=dtype.__name__)
 
     if register_kernels:
         return
@@ -566,7 +591,7 @@ def test_ddot(test, device, dtype, register_kernels=False):
         dot2[0] = wptype(2) * wp.ddot(v2[0], s2[0])
         dot4[0] = wptype(2) * wp.ddot(v4[0], s4[0])
 
-    kernel = getkernel(kernel_cache, check_mat_dot, suffix=dtype.__name__)
+    kernel = getkernel_hip_safe(kernel_cache, check_mat_dot, suffix=dtype.__name__)
 
     if register_kernels:
         return
@@ -638,7 +663,7 @@ def test_trace(test, device, dtype, register_kernels=False):
         tr2[0] = wptype(2) * wp.trace(v2[0])
         tr4[0] = wptype(2) * wp.trace(v4[0])
 
-    kernel = getkernel(kernel_cache, check_mat_trace, suffix=dtype.__name__)
+    kernel = getkernel_hip_safe(kernel_cache, check_mat_trace, suffix=dtype.__name__)
 
     if register_kernels:
         return
@@ -668,6 +693,13 @@ def test_trace(test, device, dtype, register_kernels=False):
 
 
 devices = get_test_devices()
+cuda_devices = get_selected_cuda_test_devices()
+
+# HIPRTC can crash when this module eagerly pre-registers all kernel permutations
+# in one large compile unit. Keep CUDA/NVIDIA behavior unchanged.
+register_fn = add_function_test_register_kernel
+if any(d.is_hip for d in cuda_devices):
+    register_fn = add_function_test
 
 
 class TestMatLinalg(unittest.TestCase):
@@ -675,37 +707,37 @@ class TestMatLinalg(unittest.TestCase):
 
 
 for dtype in np_scalar_types:
-    add_function_test_register_kernel(
+    register_fn(
         TestMatLinalg,
         f"test_matvec_multiplication_{dtype.__name__}",
         test_matvec_multiplication,
         devices=devices,
         dtype=dtype,
     )
-    add_function_test_register_kernel(
+    register_fn(
         TestMatLinalg,
         f"test_vecmat_multiplication_{dtype.__name__}",
         test_vecmat_multiplication,
         devices=devices,
         dtype=dtype,
     )
-    add_function_test_register_kernel(
+    register_fn(
         TestMatLinalg,
         f"test_matmat_multiplication_{dtype.__name__}",
         test_matmat_multiplication,
         devices=devices,
         dtype=dtype,
     )
-    add_function_test_register_kernel(
+    register_fn(
         TestMatLinalg, f"test_outer_product_{dtype.__name__}", test_outer_product, devices=devices, dtype=dtype
     )
-    add_function_test_register_kernel(
+    register_fn(
         TestMatLinalg, f"test_transpose_{dtype.__name__}", test_transpose, devices=devices, dtype=dtype
     )
-    add_function_test_register_kernel(
+    register_fn(
         TestMatLinalg, f"test_ddot_{dtype.__name__}", test_ddot, devices=devices, dtype=dtype
     )
-    add_function_test_register_kernel(
+    register_fn(
         TestMatLinalg, f"test_trace_{dtype.__name__}", test_trace, devices=devices, dtype=dtype
     )
 

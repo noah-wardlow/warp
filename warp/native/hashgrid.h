@@ -23,11 +23,11 @@ struct HashGrid {
     float cell_width;
     float cell_width_inv;
 
-    int* point_cells { nullptr };  // cell id of a point
-    int* point_ids { nullptr };  // index to original point
+    int* WP_RESTRICT point_cells { nullptr };  // cell id of a point
+    int* WP_RESTRICT point_ids { nullptr };  // index to original point
 
-    int* cell_starts { nullptr };  // start index of a range of indices belonging to a cell, dim_x*dim_y*dim_z in length
-    int* cell_ends { nullptr };  // end index of a range of indices belonging to a cell, dim_x*dim_y*dim_z in length
+    int* WP_RESTRICT cell_starts { nullptr };  // start index of a range of indices belonging to a cell, dim_x*dim_y*dim_z in length
+    int* WP_RESTRICT cell_ends { nullptr };  // end index of a range of indices belonging to a cell, dim_x*dim_y*dim_z in length
 
     int dim_x;
     int dim_y;

@@ -7873,6 +7873,11 @@ def capture_begin(
             raise RuntimeError("Must be a CUDA device")
         stream = device.stream
 
+    # HIP/ROCm graph capture is not yet mature (mempool pointer remapping bugs,
+    # event timing inside graphs, etc.).  Disable until hipGraph stabilizes.
+    if device.is_hip:
+        return False
+
     if external:
         # make sure the stream is already capturing
         if not stream.is_capturing:
@@ -7952,6 +7957,10 @@ def assert_conditional_graph_support():
     if runtime is None:
         init()
 
+    # HIP/ROCm does not support conditional graph nodes (no hipGraphConditionalHandle API)
+    if runtime.is_hip:
+        raise RuntimeError("Conditional graph nodes are not supported on HIP/ROCm")
+
     if runtime.toolkit_version is None or runtime.toolkit_version < (12, 4):
         raise RuntimeError("Warp must be built with CUDA Toolkit 12.4+ to enable conditional graph nodes")
 
@@ -7966,12 +7975,18 @@ def is_conditional_graph_supported() -> bool:
     """Check whether conditional graph nodes are supported.
 
     Conditional graph nodes require a CUDA driver 12.4+ and Warp to be built with CUDA Toolkit 12.4+.
+    HIP/ROCm does not support conditional graph nodes.
 
     Returns:
         ``True`` if both the CUDA Toolkit and driver versions are at least 12.4, ``False`` otherwise.
+        Always returns ``False`` on HIP/ROCm.
     """
     if runtime is None:
         init()
+
+    # HIP/ROCm does not expose hipGraphConditionalHandle or equivalent API
+    if runtime.is_hip:
+        return False
 
     return (
         runtime.toolkit_version is not None

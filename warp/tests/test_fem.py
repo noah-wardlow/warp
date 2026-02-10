@@ -2414,6 +2414,7 @@ def test_capturability(test, device):
 
 devices = get_test_devices()
 cuda_devices = get_selected_cuda_test_devices()
+cuda_graph_devices = [d for d in cuda_devices if not d.is_hip]
 
 
 class TestFem(unittest.TestCase):
@@ -2446,7 +2447,7 @@ add_function_test(TestFem, "test_particle_quadratures", test_particle_quadrature
 add_function_test(TestFem, "test_gimp_quadrature", test_gimp_quadrature)
 add_function_test(TestFem, "test_nodal_quadrature", test_nodal_quadrature)
 add_function_test(TestFem, "test_implicit_fields", test_implicit_fields)
-add_function_test(TestFem, "test_integrate_high_order", test_integrate_high_order, devices=cuda_devices)
+add_function_test(TestFem, "test_integrate_high_order", test_integrate_high_order, devices=cuda_graph_devices)
 add_function_test(TestFem, "test_interpolate_reduction", test_interpolate_reduction, devices=devices)
 
 
@@ -2469,7 +2470,7 @@ add_function_test(TestFemShapeFunctions, "test_cube_shape_functions", test_cube_
 add_function_test(TestFemShapeFunctions, "test_tri_shape_functions", test_tri_shape_functions)
 add_function_test(TestFemShapeFunctions, "test_tet_shape_functions", test_tet_shape_functions)
 
-add_function_test(TestFemShapeFunctions, "test_capturability", test_capturability, devices=cuda_devices)
+add_function_test(TestFemShapeFunctions, "test_capturability", test_capturability, devices=cuda_graph_devices)
 
 if __name__ == "__main__":
     wp.clear_kernel_cache()

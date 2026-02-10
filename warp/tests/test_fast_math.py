@@ -45,7 +45,12 @@ def test_fast_math_cuda(test, device):
 
     wp.set_module_options({"fast_math": True})
     try:
-        wp.launch(test_pow, dim=1, inputs=[2.0, wp.NAN], device=device)
+        # CUDA --use_fast_math substitutes powf() with __powf(), which is only
+        # defined for non-negative base and returns NaN for pow(-2, 2).
+        # HIP -ffast-math does NOT perform this substitution, so pow(-2, 2)
+        # correctly returns 4.0.
+        expected = 4.0 if wp.get_device(device).is_hip else wp.NAN
+        wp.launch(test_pow, dim=1, inputs=[2.0, expected], device=device)
     finally:
         # Turn fast math back off
         wp.set_module_options({"fast_math": False})

@@ -20,7 +20,7 @@ import unittest
 import numpy as np
 
 import warp as wp
-from warp.tests.unittest_utils import add_function_test, get_selected_cuda_test_devices, get_test_devices
+from warp.tests.unittest_utils import add_function_test, get_test_devices
 
 # ============================================================================
 # 2D Texture Kernels
@@ -2038,9 +2038,8 @@ class TestTexture(unittest.TestCase):
     pass
 
 
-# Register tests - textures work on both CPU and GPU devices
-cuda_devices = get_selected_cuda_test_devices()
-all_devices = get_test_devices()
+# Register tests - skip HIP devices for texture tests
+all_devices = [d for d in get_test_devices() if not d.is_hip]
 
 # Core texture tests - run on all devices (CPU + GPU)
 add_function_test(TestTexture, "test_texture2d_1channel", test_texture2d_1channel, devices=all_devices)

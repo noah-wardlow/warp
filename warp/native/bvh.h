@@ -160,14 +160,14 @@ struct BVHPackedNodeHalf {
 };
 
 struct BVH {
-    BVHPackedNodeHalf* node_lowers;
-    BVHPackedNodeHalf* node_uppers;
+    BVHPackedNodeHalf* WP_RESTRICT node_lowers;
+    BVHPackedNodeHalf* WP_RESTRICT node_uppers;
 
     // used for fast refits
-    int* node_parents;
-    int* node_counts;
+    int* WP_RESTRICT node_parents;
+    int* WP_RESTRICT node_counts;
     // reordered primitive indices corresponds to the ordering of leaf nodes
-    int* primitive_indices;
+    int* WP_RESTRICT primitive_indices;
 
     int max_depth;
     int max_nodes;
@@ -178,12 +178,12 @@ struct BVH {
     // pointer (CPU or GPU) to a single integer index in node_lowers, node_uppers
     // representing the root of the tree, this is not always the first node
     // for bottom-up builders
-    int* root;
+    int* WP_RESTRICT root;
 
     // item bounds are not owned by the BVH but by the caller
-    vec3* item_lowers;
-    vec3* item_uppers;
-    int* item_groups;
+    vec3* WP_RESTRICT item_lowers;
+    vec3* WP_RESTRICT item_uppers;
+    int* WP_RESTRICT item_groups;
     int num_items;
     int leaf_size;
 
@@ -343,7 +343,7 @@ struct bvh_stack_t {
     CUDA_CALLABLE inline int operator[](int depth) const { return ptr[depth * WP_TILE_BLOCK_DIM]; }
     CUDA_CALLABLE inline int& operator[](int depth) { return ptr[depth * WP_TILE_BLOCK_DIM]; }
 
-    int* ptr;
+    int* WP_RESTRICT ptr;
 };
 
 // stores state required to traverse the BVH nodes that

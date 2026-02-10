@@ -32,7 +32,9 @@ namespace cub = hipcub;
 namespace {
 
 template <typename T>
-__global__ void cwise_mult_kernel(int len, int stride_a, int stride_b, const T* a, const T* b, T* out)
+__global__ void cwise_mult_kernel(
+    int len, int stride_a, int stride_b, const T* WP_RESTRICT a, const T* WP_RESTRICT b, T* WP_RESTRICT out
+)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= len)

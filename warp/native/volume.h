@@ -241,7 +241,7 @@ template <typename T> struct index_value_accessor : value_accessor_base {
     pnanovdb_grid_type_t grid_type;
     array_t<T> data;
     const T& background;
-    T* adj_background;
+    T* WP_RESTRICT adj_background;
 
     explicit inline CUDA_CALLABLE index_value_accessor(
         const pnanovdb_buf_t buf, const array_t<T>& data, const T& background, T* adj_background = nullptr

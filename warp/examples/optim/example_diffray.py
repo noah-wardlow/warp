@@ -414,6 +414,8 @@ class Example:
                     self.forward()
                 self.tape.backward(self.loss)
             self.graph = capture.graph
+            if self.graph is None:
+                self.use_cuda_graph = False  # Graph capture is disabled on HIP.
 
         self.optimizer = SGD(
             [self.render_mesh.rot],

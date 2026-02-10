@@ -1129,7 +1129,12 @@ def _run_capturable_loop(
         else:
             with wp.ScopedCapture() as capture:
                 wp.capture_while(condition, do_cycle_with_condition)
-            wp.capture_launch(capture.graph)
+            if capture.graph is not None:
+                wp.capture_launch(capture.graph)
+            else:
+                # Graph capture not supported (e.g. HIP), fall back to eager loop
+                for _ in range(0, maxiter, cycle_size):
+                    do_cycle_with_condition()
     else:
         for _ in range(0, maxiter, cycle_size):
             do_cycle_with_condition()
@@ -1170,7 +1175,11 @@ def _run_solver_loop(
                 with wp.ScopedCapture(force_module_load=False) as capture:
                     do_cycle()
                 graph = capture.graph
-            wp.capture_launch(graph)
+                if graph is None:
+                    # Graph capture not supported (e.g. HIP), disable for remaining iterations
+                    use_cuda_graph = False
+            if graph is not None:
+                wp.capture_launch(graph)
         else:
             do_cycle()
 
