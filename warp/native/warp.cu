@@ -4960,7 +4960,11 @@ void wp_cuda_graphics_device_ptr_and_size(void* context, void* resource, uint64_
     size_t bytes;
     check_cu(cuGraphicsResourceGetMappedPointer_f(&device_ptr, &bytes, *(CUgraphicsResource*)resource));
 
+#if defined(__HIP_PLATFORM_AMD__)
     *ptr = reinterpret_cast<uint64_t>(device_ptr);
+#else
+    *ptr = device_ptr;
+#endif
     *size = bytes;
 }
 
