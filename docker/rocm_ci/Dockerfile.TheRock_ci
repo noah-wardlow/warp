@@ -6,7 +6,7 @@
 # context should contain.
 #
 #   docker buildx (local):
-#      docker buildx build --build-context warp_src=/path/to/warp -f docker/rocm_ci/Dockerfile.TheRock_ci --target warp_base .
+#      docker buildx build --build-context warp_src=/path/to/warp -f docker/rocm_ci/Dockerfile.TheRock_ci --target warp_base -t warp-base .
 #
 #   buildctl (CI entrypoint.sh):
 #     buildctl build --local warp_src="${SRC_FOLDER}/warp" \
@@ -26,10 +26,9 @@ ENV PYTORCH_ROCM_ARCH="gfx942"
 ENV ROCM_AMDGPU_TARGETS="gfx942"
 
 
-ARG THE_ROCK_VERSION=7.10.0
+ARG THE_ROCK_VERSION=7.9.0rc20250930
 ARG GFX_FAMILY="gfx94X-dcgpu"
 ARG PY_VERSION=3.12 
-ARG TORCH_VERSION=2.9.1
 ARG MAMBA_ENV_NAME=base
 
 # Install Ubuntu dependencies
@@ -55,6 +54,32 @@ RUN apt update \
 
 
 
+# Setup ROCm stack related envs
+# Note: the index page is at https://therock-nightly-tarball.s3.amazonaws.com/index.html
+# This will directly download the TheROCK nightly ROCm SDK tarball
+ENV THEROCK_TARBALL=https://rocm.nightlies.amd.com/tarball/therock-dist-linux-${GFX_FAMILY}-${THE_ROCK_VERSION}.tar.gz
+
+RUN mkdir -p /opt/rocm \
+    && cd /opt/rocm \
+    && wget ${THEROCK_TARBALL} \
+    && tar -xvf *.tar.gz -C /opt/rocm \
+    && rm *.tar.gz \
+    && rm -rf /opt/rocm/include/flatbuffers \
+    && rm -rf /opt/rocm/lib/libflatbuffers*
+
+ENV PATH="/opt/rocm/bin:$PATH"
+ENV LD_LIBRARY_PATH=/opt/rocm/lib
+ENV ROCM_PATH=/opt/rocm
+ENV HIP_PLATFORM=amd
+ENV HIP_DEVICE_LIB_PATH=/opt/rocm/lib/llvm/amdgcn/bitcode
+# Workaround for the HAS_STATUS_ERROR_OUT_OF_RESOURCES issue (runtime)
+ENV HAS_ENABLE_SCRATCH_ASYNC_RECLAIM=0
+ENV HAS_NO_SCRATCH_RECLAIM=1
+RUN curl -L micro.mamba.pm/install.sh | bash && \
+    ~/.local/bin/micromamba run -n ${MAMBA_ENV_NAME} ~/.local/bin/micromamba install python=${PY_VERSION} -c conda-forge --override-channels -y && \
+    ~/.local/bin/micromamba run -n ${MAMBA_ENV_NAME} pip install cmake pybind11 build ninja scikit-build-core setuptools-scm numpy pytest pytest-xdist Pillow && \
+    ~/.local/bin/micromamba run -n ${MAMBA_ENV_NAME} pip install --index-url https://rocm.nightlies.amd.com/v2-staging/${GFX_FAMILY}/ --pre torch
+
 # warp_src is a named build context — see file header for invocation details.
 COPY --from=warp_src . /root/warp/
 RUN test -f /root/warp/pyproject.toml && \
@@ -65,26 +90,8 @@ RUN test -f /root/warp/pyproject.toml && \
     }
 RUN git config --global --add safe.directory /root/warp
 
-# Setup ROCm stack related envs
-# Note: /opt/rocm/lib is intentionally NOT in PATH (it is a library dir, not a bin dir).
-# ENV PATH="/opt/rocm/bin:$PATH"
-# ENV LD_LIBRARY_PATH=/opt/rocm/lib
-ENV ROCM_PATH=/opt/rocm
-ENV HIP_PLATFORM=amd
-# ENV HIP_DEVICE_LIB_PATH=/opt/rocm/lib/llvm/amdgcn/bitcode
-# Workaround for the HAS_STATUS_ERROR_OUT_OF_RESOURCES issue (runtime)
-ENV HAS_ENABLE_SCRATCH_ASYNC_RECLAIM=0
-ENV HAS_NO_SCRATCH_RECLAIM=1
-# https://repo.amd.com/rocm/whl/gfx94X-dcgpu/torch/torch-2.9.1+rocm7.10.0-cp312-cp312-linux_x86_64.whl
-# https://repo.amd.com/rocm/whl/gfx94X-dcgpu/torch-2.9.1%2Brocm7.10.0-cp312-cp312-linux_x86_64.whl
-RUN curl -L micro.mamba.pm/install.sh | bash && \
-    ~/.local/bin/micromamba run -n ${MAMBA_ENV_NAME} ~/.local/bin/micromamba install python=${PY_VERSION} -c conda-forge --override-channels -y && \
-    ~/.local/bin/micromamba run -n ${MAMBA_ENV_NAME} pip install cmake pybind11 build ninja scikit-build-core setuptools-scm numpy pytest pytest-xdist Pillow && \
-    ~/.local/bin/micromamba run -n ${MAMBA_ENV_NAME} pip install --index-url https://repo.amd.com/rocm/whl/${GFX_FAMILY}/ "rocm[libraries,devel]==${THE_ROCK_VERSION}" && \
-    ~/.local/bin/micromamba run -n ${MAMBA_ENV_NAME} pip install --index-url https://repo.amd.com/rocm/whl/${GFX_FAMILY}/ torch=="${TORCH_VERSION}" && \
-    /bin/bash -c "eval \"\$(~/.local/bin/micromamba shell hook --shell bash)\" && \
+RUN /bin/bash -c "eval \"\$(~/.local/bin/micromamba shell hook --shell bash)\" && \
     micromamba activate ${MAMBA_ENV_NAME} && \
-    rocm-sdk init && export ROCM_PATH=\$(rocm-sdk path --root) &&\
     cd /root/warp/ && \
     python build_lib.py --jobs \$(nproc) && \
     python -m build --wheel -C--build-option=-Plinux-x86_64 && \
