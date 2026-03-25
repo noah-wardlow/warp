@@ -53,37 +53,6 @@ def find_rocm_sdk() -> str | None:
     return None
 
 
-def find_rocm_device_lib_path(rocm_path: str | None) -> str | None:
-    """Find the ROCm device library bitcode directory.
-
-    Clang needs bitcode files (e.g. ``ocml.bc``) for GPU code generation.
-    In a standard ``/opt/rocm`` install they live under ``amdgcn/bitcode/``,
-    but pip-installed TheRock SDKs may place them in a separate
-    ``_rocm_sdk_core`` site-packages tree.
-    """
-    if rocm_path is None:
-        return None
-
-    # Standard locations relative to the ROCm root
-    candidates = [
-        os.path.join(rocm_path, "amdgcn", "bitcode"),
-        os.path.join(rocm_path, "lib", "llvm", "amdgcn", "bitcode"),
-    ]
-
-    # TheRock pip-installed SDK: the core package lives next to _rocm_sdk_devel
-    # in site-packages and holds the bitcode files.
-    if "_rocm_sdk_devel" in rocm_path:
-        core_root = rocm_path.replace("_rocm_sdk_devel", "_rocm_sdk_core")
-        candidates.append(os.path.join(core_root, "amdgcn", "bitcode"))
-        candidates.append(os.path.join(core_root, "lib", "llvm", "amdgcn", "bitcode"))
-
-    for path in candidates:
-        if os.path.isdir(path):
-            return path
-
-    return None
-
-
 def find_hipcc_executable(rocm_path: str | None) -> str:
     hipcc_name = "hipcc.exe" if os.name == "nt" else "hipcc"
     if rocm_path:
@@ -854,24 +823,17 @@ def build_dll_for_arch(args, dll_path, cpp_paths, cu_paths, arch, libs: list[str
                         hip_arches = _parse_hip_arches(args)
                         hip_arch_flags = " ".join([f"--offload-arch={arch}" for arch in hip_arches])
                         # Match nvcc/NVRTC default: strict IEEE 754 FP semantics
-                        hip_fp_flags = (
-                            "-fno-finite-math-only -fno-associative-math -fno-reciprocal-math -fno-strict-aliasing"
-                        )
-                        hip_includes = f'-I"{native_dir}" -I"{args.rocm_path}/include"'
-                        hip_rocm_path_flag = f'--rocm-path="{args.rocm_path}"'
-                        device_lib_path = find_rocm_device_lib_path(args.rocm_path)
-                        if device_lib_path:
-                            hip_rocm_path_flag += f' --rocm-device-lib-path="{device_lib_path}"'
+                        hip_fp_flags = "-fno-finite-math-only -fno-associative-math -fno-reciprocal-math -fno-strict-aliasing"
                         if mode == "debug":
                             cuda_cmd = (
-                                f"{hipcc_cmd} -x hip -std=c++17 -g -O0 -fPIC -fvisibility=hidden "
-                                f"-D_DEBUG -D_ITERATOR_DEBUG_LEVEL=0 {hip_fp_flags} {hip_arch_flags} {hip_rocm_path_flag} -DWP_ENABLE_CUDA=1 "
-                                f'{hip_includes} -D{mathdx_enabled} {libmathdx_includes} -o "{cu_out}" -c "{cu_path}"'
+                                f'{hipcc_cmd} -x hip -std=c++17 -g -O0 -fPIC -fvisibility=hidden '
+                                f'-D_DEBUG -D_ITERATOR_DEBUG_LEVEL=0 {hip_fp_flags} {hip_arch_flags} -DWP_ENABLE_CUDA=1 '
+                                f'-I"{native_dir}" -D{mathdx_enabled} {libmathdx_includes} -o "{cu_out}" -c "{cu_path}"'
                             )
                         elif mode == "release":
                             cuda_cmd = (
-                                f"{hipcc_cmd} -x hip -std=c++17 -O3 -fPIC -fvisibility=hidden -DNDEBUG "
-                                f"{hip_fp_flags} {hip_arch_flags} {hip_rocm_path_flag} -DWP_ENABLE_CUDA=1 {hip_includes} -D{mathdx_enabled} "
+                                f'{hipcc_cmd} -x hip -std=c++17 -O3 -fPIC -fvisibility=hidden -DNDEBUG '
+                                f'{hip_fp_flags} {hip_arch_flags} -DWP_ENABLE_CUDA=1 -I"{native_dir}" -D{mathdx_enabled} '
                                 f'{libmathdx_includes} -o "{cu_out}" -c "{cu_path}"'
                             )
                     elif cuda_compiler == "nvcc":
