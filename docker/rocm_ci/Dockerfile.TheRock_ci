@@ -25,8 +25,7 @@ ENV MAX_JOBS=128
 ENV PYTORCH_ROCM_ARCH="gfx942"
 ENV ROCM_AMDGPU_TARGETS="gfx942"
 
-
-ARG THE_ROCK_VERSION=7.9.0rc20250930
+ARG THE_ROCK_VERSION=7.10.0a20251029
 ARG GFX_FAMILY="gfx94X-dcgpu"
 ARG PY_VERSION=3.12 
 ARG MAMBA_ENV_NAME=base
@@ -79,6 +78,15 @@ RUN curl -L micro.mamba.pm/install.sh | bash && \
     ~/.local/bin/micromamba run -n ${MAMBA_ENV_NAME} ~/.local/bin/micromamba install python=${PY_VERSION} -c conda-forge --override-channels -y && \
     ~/.local/bin/micromamba run -n ${MAMBA_ENV_NAME} pip install cmake pybind11 build ninja scikit-build-core setuptools-scm numpy pytest pytest-xdist Pillow && \
     ~/.local/bin/micromamba run -n ${MAMBA_ENV_NAME} pip install --index-url https://rocm.nightlies.amd.com/v2-staging/${GFX_FAMILY}/ --pre torch
+
+# Install rocprof-compute
+RUN wget https://github.com/ROCm/rocm-systems/releases/download/therock-7.10/rocprofiler-compute.tar.gz && \
+    tar -xvf rocprofiler-compute.tar.gz -C /tmp && \
+    cd /tmp/rocprofiler-compute && \
+    ~/.local/bin/micromamba run -n ${MAMBA_ENV_NAME} pip install -r requirements.txt && \
+    ~/.local/bin/micromamba run -n ${MAMBA_ENV_NAME} cmake -B build -G Ninja && \
+    ~/.local/bin/micromamba run -n ${MAMBA_ENV_NAME} cmake --build build --target install && \
+    which rocprof-compute
 
 # warp_src is a named build context — see file header for invocation details.
 COPY --from=warp_src . /root/warp/
