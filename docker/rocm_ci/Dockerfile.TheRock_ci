@@ -25,9 +25,14 @@ ENV MAX_JOBS=128
 ENV PYTORCH_ROCM_ARCH="gfx942"
 ENV ROCM_AMDGPU_TARGETS="gfx942"
 
-ARG THE_ROCK_VERSION=7.10.0a20251029
+
+# 7.10.0a20251121
+# 7.11.0a20251201
+# 7.12.0a20260311
+ARG THE_ROCK_VERSION=7.10.0a20251121
 ARG GFX_FAMILY="gfx94X-dcgpu"
-ARG PY_VERSION=3.12 
+ARG TORCH_VERSION=2.9.1
+ARG PY_VERSION=3.12
 ARG MAMBA_ENV_NAME=base
 
 # Install Ubuntu dependencies
@@ -51,21 +56,6 @@ RUN apt update \
     && update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-14 100 \
     && update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-14 100
 
-
-
-# Setup ROCm stack related envs
-# Note: the index page is at https://therock-nightly-tarball.s3.amazonaws.com/index.html
-# This will directly download the TheROCK nightly ROCm SDK tarball
-ENV THEROCK_TARBALL=https://rocm.nightlies.amd.com/tarball/therock-dist-linux-${GFX_FAMILY}-${THE_ROCK_VERSION}.tar.gz
-
-RUN mkdir -p /opt/rocm \
-    && cd /opt/rocm \
-    && wget ${THEROCK_TARBALL} \
-    && tar -xvf *.tar.gz -C /opt/rocm \
-    && rm *.tar.gz \
-    && rm -rf /opt/rocm/include/flatbuffers \
-    && rm -rf /opt/rocm/lib/libflatbuffers*
-
 ENV PATH="/opt/rocm/bin:$PATH"
 ENV LD_LIBRARY_PATH=/opt/rocm/lib
 ENV ROCM_PATH=/opt/rocm
@@ -77,8 +67,9 @@ ENV HAS_NO_SCRATCH_RECLAIM=1
 RUN curl -L micro.mamba.pm/install.sh | bash && \
     ~/.local/bin/micromamba run -n ${MAMBA_ENV_NAME} ~/.local/bin/micromamba install python=${PY_VERSION} -c conda-forge --override-channels -y && \
     ~/.local/bin/micromamba run -n ${MAMBA_ENV_NAME} pip install cmake pybind11 build ninja scikit-build-core setuptools-scm numpy pytest pytest-xdist Pillow && \
-    ~/.local/bin/micromamba run -n ${MAMBA_ENV_NAME} pip install --index-url https://rocm.nightlies.amd.com/v2-staging/${GFX_FAMILY}/ --pre torch
-
+    ~/.local/bin/micromamba run -n ${MAMBA_ENV_NAME} pip install --index-url https://rocm.nightlies.amd.com/v2/${GFX_FAMILY}/ "rocm[libraries,devel]"==${THE_ROCK_VERSION} && \
+    ~/.local/bin/micromamba run -n ${MAMBA_ENV_NAME} rocm-sdk init && \
+    ~/.local/bin/micromamba run -n ${MAMBA_ENV_NAME} pip install --index-url https://rocm.nightlies.amd.com/v2/${GFX_FAMILY}/ torch==${TORCH_VERSION}
 # Install rocprof-compute
 RUN wget https://github.com/ROCm/rocm-systems/releases/download/therock-7.10/rocprofiler-compute.tar.gz && \
     tar -xvf rocprofiler-compute.tar.gz -C /tmp && \
@@ -101,7 +92,7 @@ RUN git config --global --add safe.directory /root/warp
 RUN /bin/bash -c "eval \"\$(~/.local/bin/micromamba shell hook --shell bash)\" && \
     micromamba activate ${MAMBA_ENV_NAME} && \
     cd /root/warp/ && \
-    python build_lib.py --jobs \$(nproc) && \
+    python build_lib.py --jobs \$(nproc) 2>&1 | tee build_lib_{THE_ROCK_VERSION}.log && \
     python -m build --wheel -C--build-option=-Plinux-x86_64 && \
     pip install dist/warp_lang-*.whl"
 
