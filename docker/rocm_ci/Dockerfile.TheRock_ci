@@ -77,15 +77,21 @@ RUN test -f /root/warp/pyproject.toml && \
     }
 RUN git config --global --add safe.directory /root/warp
 
-# Build warp_lang wheel
-WORKDIR /root/warp
-RUN cat <<EOF > build.sh
-set -exuo pipefail
+# Persist ROCm environment for interactive containers and build scripts
+RUN cat <<'EOF' > ~/.rocm-env.sh
 export ROCM_PATH=$(rocm-sdk path --root)
-export LD_LIBRARY_PATH=$(rocm-sdk path --root)/lib:"${LD_LIBRARY_PATH}"
+export LD_LIBRARY_PATH=$(rocm-sdk path --root)/lib
 # necessary for rocm < 7.12 https://github.com/ROCm/TheRock/issues/3213
 export HIP_DEVICE_LIB_PATH=$(rocm-sdk path --root)/lib/llvm/amdgcn/bitcode
-python build_lib.py --jobs \$(nproc) 2>&1 | tee build_lib_{THE_ROCK_VERSION}.log
+EOF
+RUN echo 'source ~/.rocm-env.sh' >> ~/.bashrc
+
+# Build warp_lang wheel
+WORKDIR /root/warp
+RUN cat <<'EOF' > build.sh
+set -euxo pipefail
+source ~/.rocm-env.sh
+python build_lib.py --jobs $(nproc) 2>&1 | tee build_lib_${THE_ROCK_VERSION}.log
 python -m build --wheel -C--build-option=-Plinux-x86_64
 uv pip install dist/warp_lang-*.whl
 EOF
