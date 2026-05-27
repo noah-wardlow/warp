@@ -1103,11 +1103,19 @@ CUresult cuOccupancyMaxPotentialBlockSize_f(
     int blockSizeLimit
 )
 {
+#if defined(__HIP_PLATFORM_AMD__)
+    // HIP has no equivalent that takes a B2DSize callback. The only Warp caller
+    // passes NULL for blockSizeToDynamicSMemSize, so silently ignore it and use
+    // the fixed-shared-memory variant.
+    (void)blockSizeToDynamicSMemSize;
+    return hipModuleOccupancyMaxPotentialBlockSize(minGridSize, blockSize, func, dynamicSMemSize, blockSizeLimit);
+#else
     return pfn_cuOccupancyMaxPotentialBlockSize
         ? pfn_cuOccupancyMaxPotentialBlockSize(
               minGridSize, blockSize, func, blockSizeToDynamicSMemSize, dynamicSMemSize, blockSizeLimit
           )
         : DRIVER_ENTRY_POINT_ERROR;
+#endif  // defined(__HIP_PLATFORM_AMD__)
 }
 
 CUresult cuMemcpyPeerAsync_f(
@@ -1186,17 +1194,29 @@ CUresult cuGraphicsGLRegisterImage_f(
     CUgraphicsResource* pCudaResource, unsigned int image, unsigned int target, unsigned int flags
 )
 {
+#if defined(__HIP_PLATFORM_AMD__)
+    (void)pCudaResource;
+    (void)image;
+    (void)target;
+    (void)flags;
+    return CUDA_ERROR_NOT_SUPPORTED;
+#else
     return pfn_cuGraphicsGLRegisterImage ? pfn_cuGraphicsGLRegisterImage(pCudaResource, image, target, flags)
                                          : DRIVER_ENTRY_POINT_ERROR;
+#endif  // defined(__HIP_PLATFORM_AMD__)
 }
 
 CUresult cuGraphicsSubResourceGetMappedArray_f(
     CUarray* pArray, CUgraphicsResource resource, unsigned int arrayIndex, unsigned int mipLevel
 )
 {
+#if defined(__HIP_PLATFORM_AMD__)
+    return hipGraphicsSubResourceGetMappedArray(pArray, resource, arrayIndex, mipLevel);
+#else
     return pfn_cuGraphicsSubResourceGetMappedArray
         ? pfn_cuGraphicsSubResourceGetMappedArray(pArray, resource, arrayIndex, mipLevel)
         : DRIVER_ENTRY_POINT_ERROR;
+#endif  // defined(__HIP_PLATFORM_AMD__)
 }
 
 CUresult cuGraphicsUnregisterResource_f(CUgraphicsResource resource)
@@ -1311,7 +1331,16 @@ CUresult cuArray3DCreate_f(CUarray* pHandle, const CUDA_ARRAY3D_DESCRIPTOR* pAll
 
 CUresult cuArray3DGetDescriptor_f(CUDA_ARRAY3D_DESCRIPTOR* pArrayDescriptor, CUarray hArray)
 {
+#if defined(__HIP_PLATFORM_AMD__)
+#if defined(__HIP_NO_IMAGE_SUPPORT)
+    (void)pArrayDescriptor;
+    (void)hArray;
+    return CUDA_ERROR_NOT_SUPPORTED;
+#endif
+    return hipArray3DGetDescriptor(pArrayDescriptor, hArray);
+#else
     return pfn_cuArray3DGetDescriptor ? pfn_cuArray3DGetDescriptor(pArrayDescriptor, hArray) : DRIVER_ENTRY_POINT_ERROR;
+#endif  // defined(__HIP_PLATFORM_AMD__)
 }
 
 CUresult cuMemcpy2D_f(const CUDA_MEMCPY2D* pCopy)
@@ -1325,7 +1354,11 @@ CUresult cuMemcpy2D_f(const CUDA_MEMCPY2D* pCopy)
 
 CUresult cuMemcpy2DAsync_f(const CUDA_MEMCPY2D* pCopy, CUstream hStream)
 {
+#if defined(__HIP_PLATFORM_AMD__)
+    return hipMemcpyParam2DAsync(pCopy, hStream);
+#else
     return pfn_cuMemcpy2DAsync ? pfn_cuMemcpy2DAsync(pCopy, hStream) : DRIVER_ENTRY_POINT_ERROR;
+#endif  // defined(__HIP_PLATFORM_AMD__)
 }
 
 CUresult cuMemcpy3D_f(const CUDA_MEMCPY3D* pCopy)
@@ -1339,7 +1372,11 @@ CUresult cuMemcpy3D_f(const CUDA_MEMCPY3D* pCopy)
 
 CUresult cuMemcpy3DAsync_f(const CUDA_MEMCPY3D* pCopy, CUstream hStream)
 {
+#if defined(__HIP_PLATFORM_AMD__)
+    return hipDrvMemcpy3DAsync(pCopy, hStream);
+#else
     return pfn_cuMemcpy3DAsync ? pfn_cuMemcpy3DAsync(pCopy, hStream) : DRIVER_ENTRY_POINT_ERROR;
+#endif  // defined(__HIP_PLATFORM_AMD__)
 }
 
 CUresult cuTexObjectCreate_f(

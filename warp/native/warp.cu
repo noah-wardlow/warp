@@ -3968,7 +3968,7 @@ size_t wp_cuda_compile_program(
     (void)ltoirs;
     (void)ltoir_sizes;
     (void)ltoir_input_types;
-    (void)kernel_cache_dir;
+    (void)pch_dir;
 
     if (!cuda_src || !program_name || !output_path) {
         fprintf(stderr, "Warp HIP error: Invalid arguments to wp_cuda_compile_program\n");

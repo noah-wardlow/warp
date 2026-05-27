@@ -819,15 +819,20 @@ def build_dll_for_arch(args, dll_path, cpp_paths, cu_paths, arch, libs: list[str
                         hip_arch_flags = " ".join([f"--offload-arch={arch}" for arch in hip_arches])
                         # Match nvcc/NVRTC default: strict IEEE 754 FP semantics
                         hip_fp_flags = "-fno-finite-math-only -fno-associative-math -fno-reciprocal-math -fno-strict-aliasing"
+                        # Match the host C++ ABI (`-D_GLIBCXX_USE_CXX11_ABI=0` is used for
+                        # the .cpp objects above); without this the libstdc++ ABI tag
+                        # leaks into the mangled names of std::string-taking helpers like
+                        # apic_load_graph_cuda_setup, breaking the host<->HIP link step.
+                        hip_abi_flags = "-fvisibility-inlines-hidden -D_GLIBCXX_USE_CXX11_ABI=0"
                         if mode == "debug":
                             cuda_cmd = (
-                                f'{hipcc_cmd} -x hip -std=c++17 -g -O0 -fPIC -fvisibility=hidden '
+                                f'{hipcc_cmd} -x hip -std=c++17 -g -O0 -fPIC -fvisibility=hidden {hip_abi_flags} '
                                 f'-D_DEBUG -D_ITERATOR_DEBUG_LEVEL=0 {hip_fp_flags} {hip_arch_flags} -DWP_ENABLE_CUDA=1 '
                                 f'-I"{native_dir}" -D{mathdx_enabled} {libmathdx_includes} -o "{cu_out}" -c "{cu_path}"'
                             )
                         elif mode == "release":
                             cuda_cmd = (
-                                f'{hipcc_cmd} -x hip -std=c++17 -O3 -fPIC -fvisibility=hidden -DNDEBUG '
+                                f'{hipcc_cmd} -x hip -std=c++17 -O3 -fPIC -fvisibility=hidden {hip_abi_flags} -DNDEBUG '
                                 f'{hip_fp_flags} {hip_arch_flags} -DWP_ENABLE_CUDA=1 -I"{native_dir}" -D{mathdx_enabled} '
                                 f'{libmathdx_includes} -o "{cu_out}" -c "{cu_path}"'
                             )

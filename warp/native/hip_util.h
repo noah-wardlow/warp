@@ -403,6 +403,18 @@ using cudaMemAccessFlags = hipMemAccessFlags;
 using cudaMemLocation = hipMemLocation;
 using cudaMemAccessDesc = hipMemAccessDesc;
 using cudaUserObject_t = hipUserObject_t;
+using cudaResourceDesc = hipResourceDesc;
+using cudaArray_t = hipArray_t;
+using cudaSurfaceObject_t = hipSurfaceObject_t;
+#ifndef cudaResourceTypeArray
+#define cudaResourceTypeArray hipResourceTypeArray
+#endif  // cudaResourceTypeArray
+#ifndef cudaCreateSurfaceObject
+#define cudaCreateSurfaceObject hipCreateSurfaceObject
+#endif  // cudaCreateSurfaceObject
+#ifndef cudaDestroySurfaceObject
+#define cudaDestroySurfaceObject hipDestroySurfaceObject
+#endif  // cudaDestroySurfaceObject
 using nvrtcProgram = hiprtcProgram;
 using nvrtcResult = hiprtcResult;
 using CUresult = hipError_t;
@@ -433,6 +445,11 @@ using CUstreamCaptureStatus = hipStreamCaptureStatus;
 using CUjit_option = int;
 using CUpointer_attribute = hipPointer_attribute;
 using CUfunction_attribute = hipFuncAttribute;
+// HIP has no equivalent of the CUDA `CUoccupancyB2DSize` callback (the only HIP
+// equivalents take a fixed `size_t` shared-memory size). Provide a stub typedef
+// so call sites that reference the type compile under HIP; HIP code paths must
+// ignore the callback (see cuOccupancyMaxPotentialBlockSize_f).
+typedef size_t (CUDAAPI* CUoccupancyB2DSize)(int blockSize);
 #if HIP_VERSION >= 70100000
 using CUmemcpyAttributes = hipMemcpyAttributes;
 #else
@@ -458,6 +475,21 @@ using CUaddress_mode = HIPaddress_mode;
 #ifndef CU_AD_FORMAT_UNSIGNED_INT16
 #define CU_AD_FORMAT_UNSIGNED_INT16 HIP_AD_FORMAT_UNSIGNED_INT16
 #endif  // CU_AD_FORMAT_UNSIGNED_INT16
+#ifndef CU_AD_FORMAT_UNSIGNED_INT32
+#define CU_AD_FORMAT_UNSIGNED_INT32 HIP_AD_FORMAT_UNSIGNED_INT32
+#endif  // CU_AD_FORMAT_UNSIGNED_INT32
+#ifndef CU_AD_FORMAT_SIGNED_INT8
+#define CU_AD_FORMAT_SIGNED_INT8 HIP_AD_FORMAT_SIGNED_INT8
+#endif  // CU_AD_FORMAT_SIGNED_INT8
+#ifndef CU_AD_FORMAT_SIGNED_INT16
+#define CU_AD_FORMAT_SIGNED_INT16 HIP_AD_FORMAT_SIGNED_INT16
+#endif  // CU_AD_FORMAT_SIGNED_INT16
+#ifndef CU_AD_FORMAT_SIGNED_INT32
+#define CU_AD_FORMAT_SIGNED_INT32 HIP_AD_FORMAT_SIGNED_INT32
+#endif  // CU_AD_FORMAT_SIGNED_INT32
+#ifndef CU_AD_FORMAT_HALF
+#define CU_AD_FORMAT_HALF HIP_AD_FORMAT_HALF
+#endif  // CU_AD_FORMAT_HALF
 #ifndef CU_AD_FORMAT_FLOAT
 #define CU_AD_FORMAT_FLOAT HIP_AD_FORMAT_FLOAT
 #endif  // CU_AD_FORMAT_FLOAT
@@ -493,9 +525,16 @@ using CUaddress_mode = HIPaddress_mode;
 #ifndef CU_MEMORYTYPE_HOST
 #define CU_MEMORYTYPE_HOST hipMemoryTypeHost
 #endif  // CU_MEMORYTYPE_HOST
+#ifndef CU_MEMORYTYPE_DEVICE
+#define CU_MEMORYTYPE_DEVICE hipMemoryTypeDevice
+#endif  // CU_MEMORYTYPE_DEVICE
 #ifndef CU_MEMORYTYPE_ARRAY
 #define CU_MEMORYTYPE_ARRAY hipMemoryTypeArray
 #endif  // CU_MEMORYTYPE_ARRAY
+using CUmemorytype = hipMemoryType;
+#ifndef CUDA_ARRAY3D_SURFACE_LDST
+#define CUDA_ARRAY3D_SURFACE_LDST hipArraySurfaceLoadStore
+#endif  // CUDA_ARRAY3D_SURFACE_LDST
 #else
 using CUDA_MEMCPY2D = HIP_MEMCPY2D;
 using CUDA_MEMCPY3D = HIP_MEMCPY3D;

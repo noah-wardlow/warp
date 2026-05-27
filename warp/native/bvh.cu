@@ -26,6 +26,12 @@ namespace cub = hipcub;
 #define THRUST_IGNORE_CUB_VERSION_CHECK
 #define REORDER_HOST_TREE
 
+// cuBQL has no HIP port. Force it off on HIP so all cuBQL-namespaced helpers
+// below compile to the stub variants under `#else // WP_DISABLE_CUBQL`.
+#if defined(__HIP_PLATFORM_AMD__) && !defined(WP_DISABLE_CUBQL)
+#define WP_DISABLE_CUBQL 1
+#endif
+
 #if !defined(__HIP_PLATFORM_AMD__)
 // CUB must be included before cuBQL. cuBQL's math/common.h includes <stdexcept>,
 // which causes CCCL's _CCCL_HAS_EXCEPTIONS() to be true when typeid.h is later
