@@ -1,17 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 """Generate concise API .rst files for selected modules.
 
@@ -42,7 +30,7 @@ import subprocess
 import sys
 from bisect import bisect
 from collections import defaultdict
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import IntEnum
 from importlib.abc import Loader, MetaPathFinder
@@ -50,11 +38,15 @@ from importlib.machinery import ModuleSpec
 from pathlib import Path
 from string import digits
 from types import ModuleType
-from typing import Callable, TypeVar, get_origin
+from typing import TypeVar, get_origin
 
 import warp as wp
 
 logger = logging.getLogger(__name__)
+
+# Set to True after run() completes so that repeated calls within the same
+# process (e.g. build_docs.py running both HTML and doctest builds) are no-ops.
+_reference_generated = False
 
 # Configuration
 # -----------------------------------------------------------------------------
@@ -560,6 +552,9 @@ def write_module_page(
     # directives in the module docstring (e.g., :class:, admonitions, etc.).
     lines.append(f".. automodule:: {name}")
     lines.append("   :no-members:")
+    if name == BUILTINS_MODULE:
+        # Suppress the index entry for the internal module path.
+        lines.append("   :noindex:")
     lines.append("")
 
     lines.append(f".. currentmodule:: {current_module}")
@@ -646,7 +641,19 @@ def write_module_page(
 
 
 def run():
-    """Execute the documentation generation process."""
+    """Execute the documentation generation process.
+
+    This function is idempotent within a single process — repeated calls are
+    no-ops.  This matters when ``build_docs.py`` invokes Sphinx twice (HTML +
+    doctest), since each ``build_main`` call re-executes ``conf.py`` and
+    triggers the ``builder-inited`` hook again.
+    """
+    global _reference_generated
+    if _reference_generated:
+        logger.debug("API reference stubs already generated, skipping.")
+        return
+    _reference_generated = True
+
     logger.info("Generating API reference stubs...")
 
     install_mock_modules()
@@ -680,7 +687,7 @@ def run():
             if (filtered_count := len(all_symbols) - len(symbols)) > 0:
                 logger.debug(f"Filtered {filtered_count} builtin functions from warp module (documented separately)")
         else:
-            symbols = tuple(x for x in get_public_symbols(module_name))
+            symbols = get_public_symbols(module_name)
 
         if symbols:
             symbols_per_module[module_name] = symbols

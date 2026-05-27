@@ -1,17 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 from __future__ import annotations
 
@@ -316,7 +304,10 @@ def add_llvm_bin_to_path(args):
         print(f"Warning: LLVM bin directory not found at {llvm_bin_path}")
         return False
 
-    # Add to PATH environment variable
+    # Add to PATH environment variable (skip if already present)
+    if llvm_bin_path in os.environ.get("PATH", "").split(os.pathsep):
+        return False
+
     os.environ["PATH"] = llvm_bin_path + os.pathsep + os.environ.get("PATH", "")
 
     print(f"Added {llvm_bin_path} to PATH")
@@ -394,14 +385,14 @@ def _get_architectures_cu12(
     clang_arch_flags = []
 
     if quick_build:
-        gencode_opts = ["-gencode=arch=compute_52,code=compute_52", "-gencode=arch=compute_75,code=compute_75"]
-        clang_arch_flags = ["--cuda-gpu-arch=sm_52", "--cuda-gpu-arch=sm_75"]
+        gencode_opts = ["-gencode=arch=compute_75,code=compute_75"]
+        clang_arch_flags = ["--cuda-gpu-arch=sm_75"]
     else:
         if arch == "aarch64" and target_platform == "linux" and ctk_version == (12, 9):
             # Skip certain architectures for aarch64 with CUDA 12.9 due to CCCL bug
             print(
                 "[INFO] Skipping sm_52, sm_60, sm_61, and sm_70 targets for ARM due to a CUDA Toolkit bug. "
-                "See https://nvidia.github.io/warp/installation.html#cuda-12-9-limitation-on-linux-arm-platforms "
+                "See https://nvidia.github.io/warp/user_guide/installation.html#cuda-12-9-limitation-on-linux-arm-platforms "
                 "for details."
             )
         else:
@@ -552,6 +543,9 @@ def build_dll_for_arch(args, dll_path, cpp_paths, cu_paths, arch, libs: list[str
     hip_enabled = bool(getattr(args, "enable_hip", False) and args.rocm_path and cu_paths)
     hipcc_cmd = find_hipcc_executable(args.rocm_path) if hip_enabled else None
 
+    # Derive a unique tag from dll_path for object file names to allow parallel builds
+    _obj_tag = "." + os.path.splitext(os.path.basename(dll_path))[0].replace(".", "_")
+
     # Add LLVM bin directory to PATH
     add_llvm_bin_to_path(args)
 
@@ -608,6 +602,7 @@ def build_dll_for_arch(args, dll_path, cpp_paths, cu_paths, arch, libs: list[str
             "-std=c++17",
             "-xcuda",
             f'--cuda-path="{cuda_home}"',
+            "-D_GLIBCXX_USE_CXX11_ABI=0",
         ]
 
         # CUDA 13+ moved CUB into CCCL directory structure
@@ -678,14 +673,14 @@ def build_dll_for_arch(args, dll_path, cpp_paths, cu_paths, arch, libs: list[str
             cpp_flags += ' /D "WP_VERIFY_FP"'
 
         if args.fast_math:
-            cpp_flags += " /fp:fast"
+            cpp_flags += ' /fp:fast /D "WP_FAST_MATH"'
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=args.jobs) as executor:
             futures, wall_clock = [], time.perf_counter_ns()
 
             cpp_cmds = []
             for cpp_path in cpp_paths:
-                cpp_out = cpp_path + ".obj"
+                cpp_out = cpp_path + _obj_tag + ".obj"
                 linkopts.append(quote(cpp_out))
                 # Add warning suppressions for clang.cpp to avoid LLVM header warnings
                 extra_flags = ""
@@ -704,7 +699,7 @@ def build_dll_for_arch(args, dll_path, cpp_paths, cu_paths, arch, libs: list[str
             cuda_cmds = []
             if cu_paths:
                 for cu_path in cu_paths:
-                    cu_out = cu_path + ".o"
+                    cu_out = cu_path + _obj_tag + ".o"
 
                     _nvcc_opts = [
                         opt.replace("@filename@", os.path.basename(cu_path).replace(".", "_")) for opt in nvcc_opts
@@ -775,7 +770,7 @@ def build_dll_for_arch(args, dll_path, cpp_paths, cu_paths, arch, libs: list[str
             else:
                 version = ""
 
-        cpp_flags = f'-Werror -Wuninitialized {version} --std=c++17 -fno-rtti -D{cuda_enabled} -D{mathdx_enabled} -D{cuda_compat_enabled} -fPIC -fvisibility=hidden -D_GLIBCXX_USE_CXX11_ABI=0 -I"{native_dir}" {includes} '
+        cpp_flags = f'-Werror -Wuninitialized {version} --std=c++17 -fno-rtti -D{cuda_enabled} -D{mathdx_enabled} -D{cuda_compat_enabled} -fPIC -fvisibility=hidden -fvisibility-inlines-hidden -D_GLIBCXX_USE_CXX11_ABI=0 -I"{native_dir}" {includes} '
         if hip_enabled:
             cpp_flags += " -D__HIP_PLATFORM_AMD__ "
 
@@ -789,7 +784,7 @@ def build_dll_for_arch(args, dll_path, cpp_paths, cu_paths, arch, libs: list[str
             cpp_flags += " -DWP_VERIFY_FP"
 
         if args.fast_math:
-            cpp_flags += " -ffast-math"
+            cpp_flags += " -ffast-math -DWP_FAST_MATH"
 
         ld_inputs = []
 
@@ -798,7 +793,7 @@ def build_dll_for_arch(args, dll_path, cpp_paths, cu_paths, arch, libs: list[str
 
             cpp_cmds = []
             for cpp_path in cpp_paths:
-                cpp_out = cpp_path + ".o"
+                cpp_out = cpp_path + _obj_tag + ".o"
                 ld_inputs.append(quote(cpp_out))
                 cpp_cmd = f'{cpp_compiler} {cpp_flags} -c "{cpp_path}" -o "{cpp_out}"'
                 cpp_cmds.append(cpp_cmd)
@@ -813,7 +808,7 @@ def build_dll_for_arch(args, dll_path, cpp_paths, cu_paths, arch, libs: list[str
             cuda_cmds = []
             if cu_paths:
                 for cu_path in cu_paths:
-                    cu_out = cu_path + ".o"
+                    cu_out = cu_path + _obj_tag + ".o"
 
                     _nvcc_opts = [
                         opt.replace("@filename@", os.path.basename(cu_path).replace(".", "_")) for opt in nvcc_opts
@@ -838,15 +833,15 @@ def build_dll_for_arch(args, dll_path, cpp_paths, cu_paths, arch, libs: list[str
                             )
                     elif cuda_compiler == "nvcc":
                         if mode == "debug":
-                            cuda_cmd = f'{nvcc_cmd} --std=c++17 -g -G -O0 --compiler-options -fPIC,-fvisibility=hidden -D_DEBUG -D_ITERATOR_DEBUG_LEVEL=0 -line-info {" ".join(_nvcc_opts)} -DWP_ENABLE_CUDA=1 -I"{native_dir}" -D{mathdx_enabled} {libmathdx_includes} -o "{cu_out}" -c "{cu_path}"'
+                            cuda_cmd = f'{nvcc_cmd} --std=c++17 -g -G -O0 --compiler-options -fPIC,-fvisibility=hidden,-fvisibility-inlines-hidden,-D_GLIBCXX_USE_CXX11_ABI=0 -D_DEBUG -D_ITERATOR_DEBUG_LEVEL=0 -line-info {" ".join(_nvcc_opts)} -DWP_ENABLE_CUDA=1 -I"{native_dir}" -D{mathdx_enabled} {libmathdx_includes} -o "{cu_out}" -c "{cu_path}"'
                         elif mode == "release":
-                            cuda_cmd = f'{nvcc_cmd} --std=c++17 -O3 --compiler-options -fPIC,-fvisibility=hidden {" ".join(_nvcc_opts)} -DNDEBUG -DWP_ENABLE_CUDA=1 -I"{native_dir}" -D{mathdx_enabled} {libmathdx_includes} -o "{cu_out}" -c "{cu_path}"'
+                            cuda_cmd = f'{nvcc_cmd} --std=c++17 -O3 --compiler-options -fPIC,-fvisibility=hidden,-fvisibility-inlines-hidden,-D_GLIBCXX_USE_CXX11_ABI=0 {" ".join(_nvcc_opts)} -DNDEBUG -DWP_ENABLE_CUDA=1 -I"{native_dir}" -D{mathdx_enabled} {libmathdx_includes} -o "{cu_out}" -c "{cu_path}"'
                     else:
                         # Use Clang compiler
                         if mode == "debug":
-                            cuda_cmd = f'clang++ -Werror -Wuninitialized -Wno-unknown-cuda-version {" ".join(clang_opts)} -g -O0 -fPIC -fvisibility=hidden -D_DEBUG -D_ITERATOR_DEBUG_LEVEL=0 -DWP_ENABLE_CUDA=1 -I"{native_dir}" -D{mathdx_enabled} {libmathdx_includes} -o "{cu_out}" -c "{cu_path}"'
+                            cuda_cmd = f'clang++ -Werror -Wuninitialized -Wno-unknown-cuda-version -Wno-openmp-target {" ".join(clang_opts)} -g -O0 -fPIC -fvisibility=hidden -fvisibility-inlines-hidden -D_DEBUG -D_ITERATOR_DEBUG_LEVEL=0 -DWP_ENABLE_CUDA=1 -I"{native_dir}" -D{mathdx_enabled} {libmathdx_includes} -o "{cu_out}" -c "{cu_path}"'
                         elif mode == "release":
-                            cuda_cmd = f'clang++ -Werror -Wuninitialized -Wno-unknown-cuda-version {" ".join(clang_opts)} -O3 -fPIC -fvisibility=hidden -DNDEBUG -DWP_ENABLE_CUDA=1 -I"{native_dir}" -D{mathdx_enabled} {libmathdx_includes} -o "{cu_out}" -c "{cu_path}"'
+                            cuda_cmd = f'clang++ -Werror -Wuninitialized -Wno-unknown-cuda-version -Wno-openmp-target {" ".join(clang_opts)} -O3 -fPIC -fvisibility=hidden -fvisibility-inlines-hidden -DNDEBUG -DWP_ENABLE_CUDA=1 -I"{native_dir}" -D{mathdx_enabled} {libmathdx_includes} -o "{cu_out}" -c "{cu_path}"'
 
                     cuda_cmds.append(cuda_cmd)
 
@@ -891,15 +886,25 @@ def build_dll_for_arch(args, dll_path, cpp_paths, cu_paths, arch, libs: list[str
         if sys.platform == "darwin":
             opt_no_undefined = "-Wl,-undefined,error"
             opt_exclude_libs = ""
+            opt_static_runtime = ""
         else:
             opt_no_undefined = "-Wl,--no-undefined"
             opt_exclude_libs = "-Wl,--exclude-libs,ALL"
+            opt_static_runtime = f"-static-libstdc++ -static-libgcc -Wl,--version-script={native_dir}/warp.map"
 
         with ScopedTimer("link", active=args.verbose):
             origin = "@loader_path" if (sys.platform == "darwin") else "$ORIGIN"
-            link_compiler = hipcc_cmd if hip_enabled else cpp_compiler
-            link_version = "" if hip_enabled else version
-            link_cmd = f"{link_compiler} {link_version} -shared -Wl,-rpath,'{origin}' {opt_no_undefined} {opt_exclude_libs} -o '{dll_path}' {' '.join(ld_inputs + libs)}"
+            # On HIP, link via hipcc to pull in HIP runtime/libs; on CUDA, use the host C++
+            # compiler with the upstream static-runtime options.
+            if hip_enabled:
+                link_compiler = hipcc_cmd
+                link_version = ""
+                link_static_runtime = ""
+            else:
+                link_compiler = cpp_compiler
+                link_version = version
+                link_static_runtime = opt_static_runtime
+            link_cmd = f"{link_compiler} {link_version} -shared -Wl,-rpath,'{origin}' {link_static_runtime} {opt_no_undefined} {opt_exclude_libs} -o '{dll_path}' {' '.join(ld_inputs + libs)}"
             run_cmd(link_cmd)
 
             # Strip symbols to reduce the binary size

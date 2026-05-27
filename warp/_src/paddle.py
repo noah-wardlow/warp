@@ -1,17 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 from __future__ import annotations
 
@@ -220,19 +208,21 @@ dtype_is_compatible.compatible_sets = None
 # wrap a paddle tensor to a wp array, data is not copied
 def from_paddle(
     t: paddle.Tensor,
-    dtype: paddle.dtype | None = None,
+    dtype: type | None = None,
     requires_grad: bool | None = None,
     grad: paddle.Tensor | None = None,
     return_ctype: bool = False,
+    retain_grad: bool = False,
 ) -> warp.array:
     """Convert a Paddle tensor to a Warp array without copying the data.
 
     Args:
         t (paddle.Tensor): The paddle tensor to wrap.
-        dtype (warp.dtype, optional): The target data type of the resulting Warp array. Defaults to the tensor value type mapped to a Warp array value type.
-        requires_grad (bool, optional): Whether the resulting array should wrap the tensor's gradient, if it exists (the grad tensor will be allocated otherwise). Defaults to the tensor's `requires_grad` value.
-        grad (paddle.Tensor, optional): The grad attached to given tensor. Defaults to None.
-        return_ctype (bool, optional): Whether to return a low-level array descriptor instead of a ``wp.array`` object (faster).  The descriptor can be passed to Warp kernels.
+        dtype: The target data type of the resulting Warp array. Defaults to the tensor value type mapped to a Warp array value type.
+        requires_grad (bool): Whether the resulting array should wrap the tensor's gradient, if it exists (the grad tensor will be allocated otherwise). Defaults to the tensor's `requires_grad` value.
+        grad (paddle.Tensor): The grad attached to given tensor. Defaults to None.
+        return_ctype (bool): Whether to return a low-level array descriptor instead of a ``warp.array`` object (faster).  The descriptor can be passed to Warp kernels.
+        retain_grad (bool): Whether to preserve gradients during backward instead of zeroing after read.
 
     Returns:
         warp.array: The wrapped array or array descriptor.
@@ -333,6 +323,7 @@ def from_paddle(
             copy=False,
             grad=grad,
             requires_grad=requires_grad,
+            retain_grad=retain_grad,
         )
 
         # save a reference to the source tensor, otherwise it may get deallocated

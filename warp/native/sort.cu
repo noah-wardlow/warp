@@ -1,19 +1,5 @@
-/*
- * SPDX-FileCopyrightText: Copyright (c) 2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
- * SPDX-License-Identifier: Apache-2.0
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- * http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// SPDX-FileCopyrightText: Copyright (c) 2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
 
 #include "warp.h"
 
@@ -61,7 +47,7 @@ template <typename KeyType> void radix_sort_reserve_internal(void* context, int 
 
     if (sort_temp_size > temp.size) {
         wp_free_device(WP_CURRENT_CONTEXT, temp.mem);
-        temp.mem = wp_alloc_device(WP_CURRENT_CONTEXT, sort_temp_size);
+        temp.mem = wp_alloc_device(WP_CURRENT_CONTEXT, sort_temp_size, "(native:sort)");
         temp.size = sort_temp_size;
     }
 
@@ -174,7 +160,7 @@ void segmented_sort_reserve(void* context, int n, int num_segments, void** mem_o
 
     if (sort_temp_size > temp.size) {
         wp_free_device(WP_CURRENT_CONTEXT, temp.mem);
-        temp.mem = wp_alloc_device(WP_CURRENT_CONTEXT, sort_temp_size);
+        temp.mem = wp_alloc_device(WP_CURRENT_CONTEXT, sort_temp_size, "(native:sort)");
         temp.size = sort_temp_size;
     }
 

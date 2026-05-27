@@ -1,17 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 # ruff: noqa: PLC0415
 
@@ -553,6 +541,21 @@ def test_from_paddle_zero_strides(test, device):
     assert_np_equal(a_contiguous.numpy(), t.numpy())
 
 
+def test_paddle_retain_grad_from_paddle(test, device):
+    """Test that retain_grad can be set when converting from Paddle via from_paddle"""
+    import paddle
+
+    paddle_device = wp.device_to_paddle(device)
+    t = paddle.zeros([10], dtype="float32").to(device=paddle_device)
+    t.stop_gradient = False
+    a = wp.from_paddle(t, requires_grad=True, retain_grad=True)
+    test.assertTrue(a.retain_grad)
+
+    # Default should be False
+    a2 = wp.from_paddle(t, requires_grad=True)
+    test.assertFalse(a2.retain_grad)
+
+
 def test_paddle_autograd(test, device):
     """Test paddle autograd with a custom Warp op"""
 
@@ -770,6 +773,12 @@ try:
         add_function_test(TestPaddle, "test_to_paddle", test_to_paddle, devices=paddle_compatible_devices)
         add_function_test(TestPaddle, "test_paddle_zerocopy", test_paddle_zerocopy, devices=paddle_compatible_devices)
         add_function_test(TestPaddle, "test_paddle_autograd", test_paddle_autograd, devices=paddle_compatible_devices)
+        add_function_test(
+            TestPaddle,
+            "test_paddle_retain_grad_from_paddle",
+            test_paddle_retain_grad_from_paddle,
+            devices=paddle_compatible_devices,
+        )
         add_function_test(TestPaddle, "test_direct", test_direct, devices=paddle_compatible_devices)
 
     # NOTE: Graph not supported now
@@ -798,5 +807,4 @@ except Exception as e:
 
 
 if __name__ == "__main__":
-    wp.clear_kernel_cache()
     unittest.main(verbosity=2)

@@ -1,17 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 import importlib
 import importlib as imp
@@ -100,7 +88,9 @@ def test_redefine_command(test, device):
     cmd1.launch()
 
 
-square_two = """import warp as wp
+square_two = """# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+import warp as wp
 
 
 @wp.func
@@ -118,7 +108,9 @@ def run(expect, device):
     wp.synchronize_device(device)
 """
 
-square_four = """import warp as wp
+square_four = """# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+import warp as wp
 
 
 @wp.func
@@ -170,7 +162,9 @@ def test_reload_class(test, device):
     test_func()
 
 
-template_ref = """# This file is used to test reloading module references.
+template_ref = """# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# This file is used to test reloading module references.
 
 import warp as wp
 import warp.tests.aux_test_reference_reference as refref
@@ -181,7 +175,9 @@ def magic():
     return {} * refref.more_magic()
 """
 
-template_refref = """# This file is used to test reloading module references.
+template_refref = """# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# This file is used to test reloading module references.
 
 import warp as wp
 
@@ -254,8 +250,13 @@ def test_module_unload_during_graph_capture(test, device):
     # preload module before graph capture
     wp.load_module(device=device)
 
-    # load another module to test unloading during graph capture
-    other_module = wp.get_module("warp.tests.aux_test_module_unload")
+    # Load another module whose kernel is also captured, so unloading it
+    # during capture exercises the retention path (on CPU, the APIC state
+    # holds raw function pointers into the module's loaded object; on CUDA,
+    # the captured graph retains the module_exec).
+    import warp.tests.aux_test_module_unload as aux  # noqa: PLC0415
+
+    other_module = wp.get_module(aux.__name__)
     other_module.load(device)
 
     with wp.ScopedDevice(device):
@@ -263,8 +264,10 @@ def test_module_unload_during_graph_capture(test, device):
 
         with wp.ScopedCapture(force_module_load=False) as capture:
             wp.launch(foo, dim=1, inputs=[a])
+            wp.launch(aux.k, dim=1, inputs=[])
 
-            # unloading a module during graph capture should be fine (deferred until capture completes)
+            # Unloading a module whose kernel was captured should be deferred
+            # until the graph is destroyed — the graph retains module_execs.
             other_module.unload()
 
         wp.capture_launch(capture.graph)
@@ -296,5 +299,4 @@ add_function_test(
 
 
 if __name__ == "__main__":
-    wp.clear_kernel_cache()
     unittest.main(verbosity=2, failfast=False)

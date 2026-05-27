@@ -1,17 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 from __future__ import annotations
 
@@ -25,11 +13,10 @@ import struct
 import sys
 import types
 import zlib
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import (
     TYPE_CHECKING,
     Any,
-    Callable,
     ClassVar,
     Generic,
     Literal,
@@ -43,16 +30,26 @@ import numpy as np
 import numpy.typing as npt
 
 import warp
+import warp.config
 
 _wp_module_name_ = "warp.types"
 
 # type hints
 T = TypeVar("T")
 Length = TypeVar("Length", bound=int)
-Rows = TypeVar("Rows")
-Cols = TypeVar("Cols")
+Rows = TypeVar("Rows", bound=int)
+Cols = TypeVar("Cols", bound=int)
+Capacity = TypeVar("Capacity", bound=int)
 DType = TypeVar("DType")
 Shape = TypeVar("Shape", bound=tuple[int, ...])
+
+# NDim has a default under TYPE_CHECKING so that static type checkers (mypy, pyright)
+# accept both array[dtype] and array[dtype, Literal[ndim]] subscript syntax (PEP 696).
+# At runtime Generic doesn't enforce TypeVar defaults, so a plain TypeVar suffices.
+if TYPE_CHECKING:
+    NDim = TypeVar("NDim", bound=int, default=int)
+else:
+    NDim = TypeVar("NDim", bound=int)
 
 
 # =============================================================================
@@ -132,6 +129,63 @@ class float_base(scalar_base):
     def __repr__(self) -> str:
         return f"{type(self).__name__}({self!s})"
 
+    def __eq__(self, x):
+        try:
+            return float(self) == float(x)
+        except (TypeError, ValueError):
+            return NotImplemented
+
+    def __ne__(self, x):
+        try:
+            return float(self) != float(x)
+        except (TypeError, ValueError):
+            return NotImplemented
+
+    def __ge__(self, x):
+        try:
+            return float(self) >= float(x)
+        except (TypeError, ValueError):
+            return NotImplemented
+
+    def __gt__(self, x):
+        try:
+            return float(self) > float(x)
+        except (TypeError, ValueError):
+            return NotImplemented
+
+    def __le__(self, x):
+        try:
+            return float(self) <= float(x)
+        except (TypeError, ValueError):
+            return NotImplemented
+
+    def __lt__(self, x):
+        try:
+            return float(self) < float(x)
+        except (TypeError, ValueError):
+            return NotImplemented
+
+    def __pow__(self, x):
+        if is_array(x):
+            return NotImplemented
+
+        return warp.pow(self, x)
+
+    def __rpow__(self, x):
+        return warp.pow(x, self)
+
+    def __abs__(self):
+        return type(self)(abs(float(self)))
+
+    def __round__(self, ndigits=None):
+        return type(self)(round(float(self), ndigits))
+
+    def __hash__(self):
+        return hash(float(self))
+
+
+float_cmp_types = (float, float_base, np.floating)
+
 
 class int_base(scalar_base):
     def __index__(self) -> int:
@@ -142,6 +196,60 @@ class int_base(scalar_base):
 
     def __repr__(self) -> str:
         return f"{type(self).__name__}({self!s})"
+
+    def __eq__(self, x):
+        try:
+            if isinstance(x, float_cmp_types):
+                return float(self) == float(x)
+            return int(self) == int(x)
+        except (TypeError, ValueError):
+            return NotImplemented
+
+    def __ne__(self, x):
+        try:
+            if isinstance(x, float_cmp_types):
+                return float(self) != float(x)
+            return int(self) != int(x)
+        except (TypeError, ValueError):
+            return NotImplemented
+
+    def __ge__(self, x):
+        try:
+            if isinstance(x, float_cmp_types):
+                return float(self) >= float(x)
+            return int(self) >= int(x)
+        except (TypeError, ValueError):
+            return NotImplemented
+
+    def __gt__(self, x):
+        try:
+            if isinstance(x, float_cmp_types):
+                return float(self) > float(x)
+            return int(self) > int(x)
+        except (TypeError, ValueError):
+            return NotImplemented
+
+    def __le__(self, x):
+        try:
+            if isinstance(x, float_cmp_types):
+                return float(self) <= float(x)
+            return int(self) <= int(x)
+        except (TypeError, ValueError):
+            return NotImplemented
+
+    def __lt__(self, x):
+        try:
+            if isinstance(x, float_cmp_types):
+                return float(self) < float(x)
+            return int(self) < int(x)
+        except (TypeError, ValueError):
+            return NotImplemented
+
+    def __abs__(self):
+        return type(self)(abs(int(self)))
+
+    def __hash__(self):
+        return hash(int(self))
 
 
 class bool:
@@ -171,6 +279,13 @@ class bool:
 
 class float16(float_base):
     """16-bit half-precision floating-point scalar type."""
+
+    _length_ = 1
+    _type_ = ctypes.c_uint16
+
+
+class bfloat16(float_base):
+    """16-bit brain floating-point scalar type."""
 
     _length_ = 1
     _type_ = ctypes.c_uint16
@@ -246,17 +361,31 @@ class uint64(int_base):
     _type_ = ctypes.c_uint64
 
 
+class handle(uint64):
+    """Type for object handles (Mesh, Volume, BVH) in kernel parameters.
+
+    Behaves identically to ``uint64`` but allows APIC to detect which
+    parameters need pointer remapping during graph replay.
+    """
+
+    _wp_native_name_ = "uint64"
+
+
 # Scalar type tuples - defined here as canonical source, used by TypeVars below
 int_types = (int8, uint8, int16, uint16, int32, uint32, int64, uint64)
-float_types = (float16, float32, float64)
+float_types = (float16, bfloat16, float32, float64)
 scalar_types = int_types + float_types
 scalar_and_bool_types = (*scalar_types, bool)
+
+# Native scalar types that map directly to Python's int/float/bool.
+# These types return Python native values for backward compatibility.
+native_scalar_types = (int32, float32, bool)
 
 # TypeVars with proper constraints now that scalar types are defined
 # Note: TypeVar constraints must be listed explicitly (Pyright doesn't support unpacking)
 # Keep these in sync with the tuples above when adding new scalar types
 Int = TypeVar("Int", int, int8, uint8, int16, uint16, int32, uint32, int64, uint64)
-Float = TypeVar("Float", float, float16, float32, float64)
+Float = TypeVar("Float", float, float16, bfloat16, float32, float64)
 Scalar = TypeVar(
     "Scalar",
     int,
@@ -270,34 +399,118 @@ Scalar = TypeVar(
     int64,
     uint64,
     float16,
+    bfloat16,
     float32,
     float64,
 )
 
 
-class Vector(Generic[Length, Scalar]):
-    pass
+def _unwrap_literal(value):
+    """Extract value from Literal[x] if applicable, otherwise return as-is."""
+    if get_origin(value) is Literal:
+        args = get_args(value)
+        if len(args) == 1:
+            return args[0]
+        raise TypeError(f"Expected a single Literal value, got Literal{list(args)}")
+    return value
 
 
-class Matrix(Generic[Rows, Cols, Scalar]):
-    pass
+class Vector(Generic[Scalar, Length]):
+    """Type hint class for vector types.
+
+    Use ``Vector[dtype, Literal[length]]`` for subscript-style type hints,
+    or ``wp.types.vector(length, dtype)`` to get the actual runtime type.
+    """
+
+    @classmethod
+    def __class_getitem__(cls, params):
+        if not isinstance(params, tuple):
+            # Single TypeVar: delegate to Generic for static typing
+            if isinstance(params, TypeVar):
+                return super().__class_getitem__(params)
+            raise TypeError("Vector requires 2 parameters (dtype, length), got 1")
+
+        if any(isinstance(p, TypeVar) for p in params):
+            return super().__class_getitem__(params)
+
+        if len(params) == 2:
+            dtype, length = params
+            dtype = type_to_warp(dtype)
+            length = _unwrap_literal(length)
+            if not isinstance(length, int) or length <= 0:
+                raise TypeError(f"Vector length must be a positive integer, got {length!r}")
+            return vector(length, dtype)
+
+        raise TypeError(f"Vector requires 2 parameters (dtype, length), got {len(params)}")
+
+
+class Matrix(Generic[Scalar, Rows, Cols]):
+    """Type hint class for matrix types.
+
+    Use ``Matrix[dtype, Literal[rows], Literal[cols]]`` for subscript-style type hints,
+    or ``wp.types.matrix((rows, cols), dtype)`` to get the actual runtime type.
+    """
+
+    @classmethod
+    def __class_getitem__(cls, params):
+        if not isinstance(params, tuple):
+            if isinstance(params, TypeVar):
+                return super().__class_getitem__(params)
+            raise TypeError("Matrix requires 3 parameters (dtype, rows, cols), got 1")
+
+        if any(isinstance(p, TypeVar) for p in params):
+            return super().__class_getitem__(params)
+
+        if len(params) == 3:
+            dtype, rows, cols = params
+            dtype = type_to_warp(dtype)
+            rows = _unwrap_literal(rows)
+            cols = _unwrap_literal(cols)
+            if not isinstance(rows, int) or rows <= 0:
+                raise TypeError(f"Matrix rows must be a positive integer, got {rows!r}")
+            if not isinstance(cols, int) or cols <= 0:
+                raise TypeError(f"Matrix cols must be a positive integer, got {cols!r}")
+            return matrix((rows, cols), dtype)
+
+        raise TypeError(f"Matrix requires 3 parameters (dtype, rows, cols), got {len(params)}")
 
 
 class Quaternion(Generic[Float]):
-    pass
+    """Type hint class for quaternion types.
+
+    Use ``Quaternion[dtype]`` for subscript-style type hints,
+    or ``wp.types.quaternion(dtype)`` to get the actual runtime type.
+    """
+
+    @classmethod
+    def __class_getitem__(cls, params):
+        if isinstance(params, TypeVar):
+            return super().__class_getitem__(params)
+        return quaternion(type_to_warp(params))
 
 
 class Transformation(Generic[Float]):
-    pass
+    """Type hint class for transformation types.
+
+    Use ``Transformation[dtype]`` for subscript-style type hints,
+    or ``wp.types.transformation(dtype)`` to get the actual runtime type.
+    """
+
+    @classmethod
+    def __class_getitem__(cls, params):
+        if isinstance(params, TypeVar):
+            return super().__class_getitem__(params)
+        return transformation(type_to_warp(params))
 
 
-class Array(Generic[DType]):
+class Array(Generic[DType, NDim]):
     # Type annotations are guarded to prevent Sphinx from documenting them
     # as inherited attributes, which would conflict with the docstring
     # attributes in the `array` subclass.
     if TYPE_CHECKING:
         device: warp._src.context.Device | None
         dtype: type
+        ndim: int
         size: int
 
     def __add__(self, other) -> array:
@@ -388,6 +601,10 @@ class Tile(Generic[DType, Shape]):
     pass
 
 
+class TileStack(Generic[DType, Capacity]):
+    pass
+
+
 def constant(x):
     """Function to declare compile-time constants accessible from Warp kernels
 
@@ -407,6 +624,89 @@ def float_to_half_bits(value):
 
 def half_bits_to_float(value):
     return warp._src.context.runtime.core.wp_half_bits_to_float(value)
+
+
+def float_to_bfloat16_bits(value):
+    return warp._src.context.runtime.core.wp_float_to_bfloat16_bits(value)
+
+
+def bfloat16_bits_to_float(value):
+    return warp._src.context.runtime.core.wp_bfloat16_bits_to_float(value)
+
+
+_ml_dtypes_bfloat16 = _UNSET = object()
+
+
+def _get_ml_dtypes_bfloat16():
+    """Return ``ml_dtypes.bfloat16`` if the package is installed, otherwise ``None``.
+
+    The result is cached after the first call so the import is attempted at most once.
+    """
+    global _ml_dtypes_bfloat16
+    if _ml_dtypes_bfloat16 is _UNSET:
+        try:
+            import ml_dtypes  # noqa: PLC0415
+
+            _ml_dtypes_bfloat16 = ml_dtypes.bfloat16
+        except ImportError:
+            _ml_dtypes_bfloat16 = None
+    return _ml_dtypes_bfloat16
+
+
+def _np_float32_to_bfloat16_bits(arr_f32: np.ndarray) -> np.ndarray:
+    """Convert a float32 NumPy array to bfloat16 stored as uint16 (round-to-nearest-even).
+
+    This performs the same conversion as ``float_to_bfloat16_bits`` but operates on entire
+    NumPy arrays using vectorized operations, which is significantly faster for bulk data.
+
+    Uses ``ml_dtypes.bfloat16`` for the conversion when available, falling back to a
+    manual bit-manipulation implementation otherwise.
+    """
+    ml_bf16 = _get_ml_dtypes_bfloat16()
+    if ml_bf16 is not None:
+        return np.asarray(arr_f32, dtype=ml_bf16).view(np.uint16)
+    arr_f32 = np.asarray(arr_f32, dtype=np.float32)
+    bits = arr_f32.view(np.uint32)
+
+    # Handle NaN: preserve NaN payload but ensure it stays NaN after truncation.
+    # A float32 NaN has exponent=0xFF and a non-zero mantissa (23 bits).
+    # Truncating to bfloat16 keeps only the top 7 mantissa bits, which could become
+    # zero and turn the NaN into an infinity. Force the quiet-NaN bit (bit 22 of
+    # float32, i.e. bit 6 of the bfloat16 mantissa) so the value remains NaN.
+    nan_mask = np.isnan(arr_f32)
+    bits = np.where(nan_mask, bits | np.uint32(0x0040_0000), bits)
+
+    # Round-to-nearest-even: add rounding bias based on the LSB of the result.
+    # Skip rounding for NaN values because the quiet-NaN fixup can set many
+    # mantissa bits, and the rounding addition can then overflow out of the
+    # NaN encoding (e.g. 0x7FFFFFFF + 0x8000 = 0x80007FFF → negative zero).
+    rounding_bias = (bits >> 16) & np.uint32(1)
+    bits_rounded = bits + np.uint32(0x7FFF) + rounding_bias
+    bits_result = np.where(nan_mask, bits, bits_rounded)
+
+    return ((bits_result >> 16) & np.uint32(0xFFFF)).astype(np.uint16)
+
+
+def _np_bfloat16_bits_to_float32(arr_u16: np.ndarray) -> np.ndarray:
+    """Convert a bfloat16 (uint16) NumPy array back to float32.
+
+    This performs the same conversion as ``bfloat16_bits_to_float`` but operates on entire
+    NumPy arrays using vectorized operations.
+
+    Uses ``ml_dtypes.bfloat16`` for the conversion when available, falling back to a
+    manual bit-manipulation implementation otherwise.
+    """
+    ml_bf16 = _get_ml_dtypes_bfloat16()
+    if ml_bf16 is not None:
+        return np.asarray(arr_u16, dtype=np.uint16).view(ml_bf16).astype(np.float32)
+    arr_u16 = np.asarray(arr_u16, dtype=np.uint16)
+    bits = arr_u16.astype(np.uint32) << 16
+    return bits.view(np.float32)
+
+
+def _is_bit_converted_float(dtype):
+    """Check if a scalar type requires bit conversion (stored as uint16 internally)."""
+    return dtype is float16 or dtype is bfloat16
 
 
 def safe_len(obj):
@@ -516,7 +816,7 @@ def _binary_op(self, op, x, t, cw=True):
     if kind == BuiltinOpDispatchKind.BROADCAST_SCALAR:
         return t(*(warp._src.context.call_builtin_from_desc(desc, (a, x)) for a in self))
 
-    return t(*(warp._src.context.call_builtin_from_desc(desc, (a, b)) for a, b in zip(self, x)))
+    return t(*(warp._src.context.call_builtin_from_desc(desc, (a, b)) for a, b in zip(self, x, strict=True)))
 
 
 def _rbinary_op(self, op, x, t, cw=True):
@@ -544,7 +844,7 @@ def _rbinary_op(self, op, x, t, cw=True):
     if kind == BuiltinOpDispatchKind.BROADCAST_SCALAR:
         return t(*(warp._src.context.call_builtin_from_desc(desc, (x, a)) for a in self))
 
-    return t(*(warp._src.context.call_builtin_from_desc(desc, (b, a)) for a, b in zip(self, x)))
+    return t(*(warp._src.context.call_builtin_from_desc(desc, (b, a)) for a, b in zip(self, x, strict=True)))
 
 
 @functools.cache
@@ -580,13 +880,26 @@ def vector(length, dtype):
         _wp_generic_type_hint_ = Vector
         _wp_constructor_ = "vector"
 
-        # special handling for float16 type: in this case, data is stored
-        # as uint16 but it's actually half precision floating point
+        # special handling for float16/bfloat16 type: in this case, data is stored
+        # as uint16 but it's actually 16-bit floating-point
         # data. This means we need to convert each of the arguments
-        # to uint16s containing half float bits before storing them in
+        # to uint16s containing 16-bit float bits before storing them in
         # the array:
-        scalar_import = float_to_half_bits if _wp_scalar_type_ is float16 else lambda x: x
-        scalar_export = half_bits_to_float if _wp_scalar_type_ is float16 else lambda x: x
+        if _wp_scalar_type_ is float16:
+            scalar_import = float_to_half_bits
+            scalar_export = half_bits_to_float
+        elif _wp_scalar_type_ is bfloat16:
+            scalar_import = float_to_bfloat16_bits
+            scalar_export = bfloat16_bits_to_float
+        else:
+
+            def scalar_import(x):
+                return x
+
+            def scalar_export(x):
+                return x
+
+        _wp_is_bit_converted_ = _is_bit_converted_float(_wp_scalar_type_)
 
         def __init__(self, *args):
             num_args = len(args)
@@ -616,9 +929,16 @@ def vector(length, dtype):
 
         def __getitem__(self, key):
             if isinstance(key, int):
-                return vec_t.scalar_export(super().__getitem__(key))
+                if warp.config.legacy_scalar_return_types:
+                    # Legacy path before addressing GH-905.
+                    return vec_t.scalar_export(super().__getitem__(key))
+
+                value = vec_t.scalar_export(super().__getitem__(key))
+                if dtype in native_scalar_types:
+                    return value
+                return self._wp_scalar_type_(value)
             elif isinstance(key, slice):
-                if self._wp_scalar_type_ is float16:
+                if self._wp_is_bit_converted_:
                     values = tuple(vec_t.scalar_export(x) for x in super().__getitem__(key))
                 else:
                     values = super().__getitem__(key)
@@ -651,14 +971,14 @@ def vector(length, dtype):
                         f"Expected to assign a slice from a sequence of values but got `{type(value).__name__}` instead"
                     ) from None
 
-                if self._wp_scalar_type_ is float16:
+                if self._wp_is_bit_converted_:
                     converted = []
                     try:
                         for x in value:
                             converted.append(vec_t.scalar_import(x))
                     except ctypes.ArgumentError:
                         raise TypeError(
-                            f"Expected to assign a slice from a sequence of `float16` values "
+                            f"Expected to assign a slice from a sequence of `{self._wp_scalar_type_.__name__}` values "
                             f"but got `{type(x).__name__}` instead"
                         ) from None
 
@@ -667,12 +987,12 @@ def vector(length, dtype):
                 try:
                     return super().__setitem__(key, value)
                 except TypeError:
-                    # ctypes.Array doesn't accept this sequence type (e.g. torch tensors)
-                    # or the sequence has a different size, fall back to element-by-element assignment
+                    # ctypes.Array doesn't accept this sequence type (e.g. torch tensors),
+                    # fall back to element-by-element assignment
                     if indices is None:
                         indices = range(*key.indices(self._length_))
 
-                    for idx, x in zip(indices, value):
+                    for idx, x in zip(indices, value, strict=True):
                         try:
                             super().__setitem__(idx, self._type_(x))
                         except TypeError:
@@ -751,7 +1071,7 @@ def vector(length, dtype):
         def from_ptr(cls, ptr):
             if ptr:
                 # create a new vector instance and initialize the contents from the binary data
-                # this skips float16 conversions, assuming that float16 data is already encoded as uint16
+                # this skips float16/bfloat16 conversions, assuming that data is already encoded as uint16
                 value = cls()
                 ctypes.memmove(ctypes.byref(value), ptr, ctypes.sizeof(cls._type_) * cls._length_)
                 return value
@@ -799,13 +1119,26 @@ def matrix(shape, dtype):
         _wp_row_type_ = vector(0 if shape[1] is Any else shape[1], dtype)
         _wp_col_type_ = vector(0 if shape[0] is Any else shape[0], dtype)
 
-        # special handling for float16 type: in this case, data is stored
-        # as uint16 but it's actually half precision floating point
+        # special handling for float16/bfloat16 type: in this case, data is stored
+        # as uint16 but it's actually 16-bit floating-point
         # data. This means we need to convert each of the arguments
-        # to uint16s containing half float bits before storing them in
+        # to uint16s containing 16-bit float bits before storing them in
         # the array:
-        scalar_import = float_to_half_bits if _wp_scalar_type_ is float16 else lambda x: x
-        scalar_export = half_bits_to_float if _wp_scalar_type_ is float16 else lambda x: x
+        if _wp_scalar_type_ is float16:
+            scalar_import = float_to_half_bits
+            scalar_export = half_bits_to_float
+        elif _wp_scalar_type_ is bfloat16:
+            scalar_import = float_to_bfloat16_bits
+            scalar_export = bfloat16_bits_to_float
+        else:
+
+            def scalar_import(x):
+                return x
+
+            def scalar_export(x):
+                return x
+
+        _wp_is_bit_converted_ = _is_bit_converted_float(_wp_scalar_type_)
 
         def __init__(self, *args):
             num_args = len(args)
@@ -922,7 +1255,7 @@ def matrix(shape, dtype):
             row_start = r * self._shape_[1]
             row_end = row_start + self._shape_[1]
             row_data = super().__getitem__(slice(row_start, row_end))
-            if self._wp_scalar_type_ is float16:
+            if self._wp_is_bit_converted_:
                 return self._wp_row_type_(*[mat_t.scalar_export(x) for x in row_data])
             else:
                 return self._wp_row_type_(row_data)
@@ -936,7 +1269,7 @@ def matrix(shape, dtype):
             col_end = col_start + self._shape_[0] * self._shape_[1]
             col_step = self._shape_[1]
             col_data = super().__getitem__(slice(col_start, col_end, col_step))
-            if self._wp_scalar_type_ is float16:
+            if self._wp_is_bit_converted_:
                 return self._wp_col_type_(*[mat_t.scalar_export(x) for x in col_data])
             else:
                 return self._wp_col_type_(col_data)
@@ -963,14 +1296,14 @@ def matrix(shape, dtype):
                     f"Expected to assign a slice from a sequence of values but got `{type(v).__name__}` instead"
                 ) from None
 
-            if self._wp_scalar_type_ is float16:
+            if self._wp_is_bit_converted_:
                 converted = []
                 try:
                     for x in v:
                         converted.append(mat_t.scalar_import(x))
                 except ctypes.ArgumentError:
                     raise TypeError(
-                        f"Expected to assign a slice from a sequence of `float16` values "
+                        f"Expected to assign a slice from a sequence of `{self._wp_scalar_type_.__name__}` values "
                         f"but got `{type(x).__name__}` instead"
                     ) from None
 
@@ -1000,14 +1333,14 @@ def matrix(shape, dtype):
                     f"Expected to assign a slice from a sequence of values but got `{type(v).__name__}` instead"
                 ) from None
 
-            if self._wp_scalar_type_ is float16:
+            if self._wp_is_bit_converted_:
                 converted = []
                 try:
                     for x in v:
                         converted.append(mat_t.scalar_import(x))
                 except ctypes.ArgumentError:
                     raise TypeError(
-                        f"Expected to assign a slice from a sequence of `float16` values "
+                        f"Expected to assign a slice from a sequence of `{self._wp_scalar_type_.__name__}` values "
                         f"but got `{type(x).__name__}` instead"
                     ) from None
 
@@ -1026,7 +1359,15 @@ def matrix(shape, dtype):
                 if ndim == 0:
                     row = key[0] + self._shape_[0] if key[0] < 0 else key[0]
                     col = key[1] + self._shape_[1] if key[1] < 0 else key[1]
-                    return mat_t.scalar_export(super().__getitem__(row * self._shape_[1] + col))
+
+                    if warp.config.legacy_scalar_return_types:
+                        # Legacy path before addressing GH-905.
+                        return mat_t.scalar_export(super().__getitem__(row * self._shape_[1] + col))
+
+                    value = mat_t.scalar_export(super().__getitem__(row * self._shape_[1] + col))
+                    if dtype in native_scalar_types:
+                        return value
+                    return self._wp_scalar_type_(value)
 
                 if ndim == 1:
                     if isinstance(key[1], slice):
@@ -1173,7 +1514,7 @@ def matrix(shape, dtype):
         def from_ptr(cls, ptr):
             if ptr:
                 # create a new matrix instance and initialize the contents from the binary data
-                # this skips float16 conversions, assuming that float16 data is already encoded as uint16
+                # this skips float16/bfloat16 conversions, assuming that data is already encoded as uint16
                 value = cls()
                 ctypes.memmove(ctypes.byref(value), ptr, ctypes.sizeof(cls._type_) * cls._length_)
                 return value
@@ -1293,6 +1634,7 @@ class void:
         pass
 
 
+@functools.cache
 def quaternion(dtype=Any):
     """Create a quaternion type with the given data type."""
 
@@ -1323,6 +1665,7 @@ class quatd(quaternion(dtype=float64)):
     """Quaternion with float64 (double-precision) components for 3D rotations."""
 
 
+@functools.cache
 def transformation(dtype=Any):
     """Create a rigid-body transformation type with the given data type."""
 
@@ -1723,6 +2066,7 @@ warp_type_to_np_dtype = {
     uint32: np.uint32,
     uint64: np.uint64,
     float16: np.float16,
+    bfloat16: np.uint16,  # TODO: Use ml_dtypes.bfloat16 when available (see also _np_float32_to_bfloat16_bits)
     float32: np.float32,
     float64: np.float64,
 }
@@ -1735,8 +2079,11 @@ def dtype_from_numpy(numpy_dtype):
     wp_dtype = np_dtype_to_warp_type.get(numpy_dtype)
     if wp_dtype is not None:
         return wp_dtype
-    else:
-        raise TypeError(f"Cannot convert {numpy_dtype} to a Warp type")
+    # Check for ml_dtypes.bfloat16 (not in the static map because ml_dtypes is optional)
+    ml_bf16 = _get_ml_dtypes_bfloat16()
+    if ml_bf16 is not None and np.dtype(numpy_dtype) == np.dtype(ml_bf16):
+        return bfloat16
+    raise TypeError(f"Cannot convert {numpy_dtype} to a Warp type")
 
 
 def dtype_to_numpy(warp_dtype):
@@ -1813,11 +2160,23 @@ class MeshQueryAABBTiled:
     _wp_native_name_ = "mesh_query_aabb_thread_block_t"
 
 
-# definition just for kernel type (cannot be a parameter), see hash_grid.h
+# definition just for kernel type (cannot be a parameter), see hashgrid.h
 class HashGridQuery:
-    """Object used to track state during neighbor traversal."""
+    """Object used to track state during neighbor traversal (float32)."""
 
-    _wp_native_name_ = "hash_grid_query_t"
+    _wp_native_name_ = "hash_grid_query_f"
+
+
+class HashGridQueryH:
+    """Object used to track state during neighbor traversal (float16)."""
+
+    _wp_native_name_ = "hash_grid_query_h"
+
+
+class HashGridQueryD:
+    """Object used to track state during neighbor traversal (float64)."""
+
+    _wp_native_name_ = "hash_grid_query_d"
 
 
 # maximum number of dimensions, must match array.h
@@ -1829,6 +2188,9 @@ ARRAY_TYPE_REGULAR = 0
 ARRAY_TYPE_INDEXED = 1
 ARRAY_TYPE_FABRIC = 2
 ARRAY_TYPE_FABRIC_INDEXED = 3
+
+# must match array.h
+ARRAY_FLAG_RETAIN_GRAD = 1 << 0
 
 
 # represents bounds for kernel launch (number of threads across multiple dimensions)
@@ -1916,13 +2278,15 @@ class array_t(ctypes.Structure):
         ("grad", ctypes.c_uint64),
         ("shape", ctypes.c_int32 * ARRAY_MAX_DIMS),
         ("strides", ctypes.c_int32 * ARRAY_MAX_DIMS),
-        ("ndim", ctypes.c_int32),
+        ("ndim", ctypes.c_uint16),
+        ("flags", ctypes.c_uint16),
     )
 
-    def __init__(self, data=0, grad=0, ndim=0, shape=(0,), strides=(0,)):
+    def __init__(self, data=0, grad=0, ndim=0, shape=(0,), strides=(0,), flags=0):
         self.data = data
         self.grad = grad
         self.ndim = ndim
+        self.flags = flags
         for i in range(ndim):
             self.shape[i] = shape[i]
             self.strides[i] = strides[i]
@@ -1934,19 +2298,20 @@ class array_t(ctypes.Structure):
 
     # structured value used when array_t is packed in a struct and shared via a numpy structured array
     def numpy_value(self):
-        return (self.data, self.grad, list(self.shape), list(self.strides), self.ndim)
+        return (self.data, self.grad, list(self.shape), list(self.strides), self.ndim, self.flags)
 
 
 # NOTE: must match array_t._fields_
 array_t._numpy_dtype_ = {
-    "names": ["data", "grad", "shape", "strides", "ndim"],
-    "formats": ["u8", "u8", f"{ARRAY_MAX_DIMS}i4", f"{ARRAY_MAX_DIMS}i4", "i4"],
+    "names": ["data", "grad", "shape", "strides", "ndim", "flags"],
+    "formats": ["u8", "u8", f"{ARRAY_MAX_DIMS}i4", f"{ARRAY_MAX_DIMS}i4", "u2", "u2"],
     "offsets": [
         array_t.data.offset,
         array_t.grad.offset,
         array_t.shape.offset,
         array_t.strides.offset,
         array_t.ndim.offset,
+        array_t.flags.offset,
     ],
     "itemsize": ctypes.sizeof(array_t),
 }
@@ -1961,7 +2326,8 @@ class indexedarray_t(ctypes.Structure):
 
     def __init__(self, data, indices, shape):
         if data is None:
-            self.data = array().__ctype__()
+            ndim = len(shape)
+            self.data = array_t(data=0, grad=0, ndim=ndim, shape=(0,) * ndim, strides=(0,) * ndim)
             for i in range(ARRAY_MAX_DIMS):
                 self.indices[i] = ctypes.c_void_p(None)
                 self.shape[i] = 0
@@ -1973,6 +2339,38 @@ class indexedarray_t(ctypes.Structure):
                 else:
                     self.indices[i] = ctypes.c_void_p(None)
                 self.shape[i] = shape[i]
+
+    # structured type description used when indexedarray_t is packed in a struct and shared via numpy structured array.
+    @classmethod
+    def numpy_dtype(cls):
+        return cls._numpy_dtype_
+
+    # structured value used when indexedarray_t is packed in a struct and shared via a numpy structured array
+    def numpy_value(self):
+        # pointers are represented as unsigned 64-bit integers
+        indices = []
+        for i in range(ARRAY_MAX_DIMS):
+            v = self.indices[i]
+            # v may be a ctypes.c_void_p instance
+            if isinstance(v, ctypes.c_void_p):
+                indices.append(0 if v.value is None else int(v.value))
+            else:
+                indices.append(0 if v is None else int(v))
+
+        return (self.data.numpy_value(), indices, list(self.shape))
+
+
+# NOTE: must match indexedarray_t._fields_
+indexedarray_t._numpy_dtype_ = {
+    "names": ["data", "indices", "shape"],
+    "formats": [array_t.numpy_dtype(), f"{ARRAY_MAX_DIMS}u8", f"{ARRAY_MAX_DIMS}i4"],
+    "offsets": [
+        indexedarray_t.data.offset,
+        indexedarray_t.indices.offset,
+        indexedarray_t.shape.offset,
+    ],
+    "itemsize": ctypes.sizeof(indexedarray_t),
+}
 
 
 class tuple_t:
@@ -2078,6 +2476,8 @@ def type_typestr(dtype: type) -> str:
         return "|b1"
     elif dtype is float16:
         return "<f2"
+    elif dtype is bfloat16:
+        return "<u2"
     elif dtype is float32:
         return "<f4"
     elif dtype is float64:
@@ -2098,6 +2498,8 @@ def type_typestr(dtype: type) -> str:
         return "<i8"
     elif dtype is uint64:
         return "<u8"
+    elif dtype is handle:
+        return "<u8"
     elif isinstance(dtype, warp._src.codegen.Struct):
         return f"|V{ctypes.sizeof(dtype.ctype)}"
     elif hasattr(dtype, "_wp_ctype_"):
@@ -2112,6 +2514,8 @@ def type_typestr(dtype: type) -> str:
 def scalar_short_name(t):
     if t is float16:
         return "h"
+    elif t is bfloat16:
+        return "bf"
     elif t is float32:
         return "f"
     elif t is float64:
@@ -2137,15 +2541,19 @@ def scalar_short_name(t):
 
 def type_repr(t) -> str:
     """Convert a Warp type to a human-readable string representation."""
+    if t is Any:
+        return "Any"
     if is_array(t):
-        if hasattr(t, "device") and t.device is None:
+        cls_name = concrete_array_type(t).__name__
+        if isinstance(t, _ArrayAnnotationBase) or (hasattr(t, "device") and t.device is None):
             # array is used as a type annotation - display ndim instead of shape
-            return f"{type(t).__name__}(ndim={t.ndim}, dtype={type_repr(t.dtype)})"
-        return f"{type(t).__name__}(shape={t.shape}, dtype={type_repr(t.dtype)})"
+            ndim_repr = "Any" if t.ndim is Any else t.ndim
+            return f"{cls_name}(ndim={ndim_repr}, dtype={type_repr(t.dtype)})"
+        return f"{cls_name}(shape={t.shape}, dtype={type_repr(t.dtype)})"
     if is_tuple(t):
         return f"tuple({', '.join(type_repr(x) for x in t.types)})"
     if get_origin(t) is tuple:
-        # Handle Python 3.9+ native tuple[...] syntax
+        # Handle native tuple[...] syntax
         args = get_args(t)
         if args:
             return f"tuple({', '.join(type_repr(x) for x in args)})"
@@ -2171,7 +2579,7 @@ def type_repr(t) -> str:
         return f"vector(length={t._shape_[0]}, dtype={type_repr(t._wp_scalar_type_)})"
     if type_is_matrix(t):
         if sn is not None and t._shape_[0] <= 4 and t._shape_[1] <= 4:
-            return f"mat{t._shape_[0]}{t._shape_[1]}({sn})"
+            return f"mat{t._shape_[0]}{t._shape_[1]}{sn}"
         return f"matrix(shape=({t._shape_[0]}, {t._shape_[1]}), dtype={type_repr(t._wp_scalar_type_)})"
     if t in scalar_types:
         return t.__name__
@@ -2314,8 +2722,22 @@ def is_struct(x) -> builtins.bool:
 
 
 def is_array(x) -> builtins.bool:
-    """Return ``True`` if the value is one of the Warp array type instances."""
-    return isinstance(x, array_types)
+    """Return ``True`` if the value is one of the Warp array type instances or annotations."""
+    return isinstance(x, (array_types, _ArrayAnnotationBase))
+
+
+def matches_array_class(t, cls) -> builtins.bool:
+    """True if ``t`` is an instance of ``cls`` or an annotation for ``cls``."""
+    if isinstance(t, _ArrayAnnotationBase):
+        return t._concrete_cls is cls
+    return isinstance(t, cls)
+
+
+def concrete_array_type(t) -> type:
+    """Return the concrete array class for an annotation or instance."""
+    if isinstance(t, _ArrayAnnotationBase):
+        return t._concrete_cls
+    return type(t)
 
 
 def is_tuple(x) -> builtins.bool:
@@ -2365,6 +2787,10 @@ def scalars_equal_generic(a, b, match_generic=True):
             return True
         if a is Float and b is Float:
             return True
+
+    # handle and uint64 are interchangeable (handle is a semantic alias for uint64)
+    if (a is handle and b is uint64) or (a is uint64 and b is handle):
+        return True
 
     return a is b
 
@@ -2424,7 +2850,7 @@ def types_equal_generic(a, b, match_generic=True):
                 return seq_match_ellipsis(b, a)
 
             return len(a) == len(b) and all(
-                types_equal_generic(x, y, match_generic=match_generic) for x, y in zip(a, b)
+                types_equal_generic(x, y, match_generic=match_generic) for x, y in zip(a, b, strict=True)
             )
         elif a_is_seq or b_is_seq:
             # A sequence can only match to another sequence.
@@ -2449,14 +2875,26 @@ def types_equal_generic(a, b, match_generic=True):
         if not isinstance(a, type) or not isinstance(b, type):
             return False
 
-        for p1, p2 in zip(a._wp_type_params_, b._wp_type_params_):
+        for p1, p2 in zip(a._wp_type_params_, b._wp_type_params_, strict=True):
             if not scalars_equal_generic(p1, p2, match_generic=match_generic):
                 return False
 
         return True
 
-    if is_array(a) or is_tile(a):
+    if is_array(a):
+        return concrete_array_type(a) is concrete_array_type(b) and types_equal_generic(
+            a.dtype, b.dtype, match_generic=match_generic
+        )
+
+    if is_tile(a):
         return type(a) is type(b) and types_equal_generic(a.dtype, b.dtype, match_generic=match_generic)
+
+    if is_tile_stack(a):
+        return (
+            is_tile_stack(b)
+            and a.capacity == b.capacity
+            and types_equal_generic(a.dtype, b.dtype, match_generic=match_generic)
+        )
 
     if is_slice(a):
         return type(a) is type(b)
@@ -2557,7 +2995,7 @@ def array_ctype_from_interface(interface: dict, dtype=None, owner=None):
     return array_ctype
 
 
-class array(Array[DType]):
+class array(Array[DType, NDim]):
     """A fixed-size multi-dimensional array containing values of the same type.
 
     Attributes:
@@ -2574,6 +3012,11 @@ class array(Array[DType]):
         deleter (Callable[[int, int], None]): A function to be called when the array is deleted,
             taking two arguments: pointer and size. If ``None``, then no function is called.
     """
+
+    @classmethod
+    def __class_getitem__(cls, params):
+        """Support ``wp.array[dtype]`` and ``wp.array[dtype, Literal[ndim]]`` syntax."""
+        return _parse_array_subscript(cls, params)
 
     def __new__(cls, *args, **kwargs):
         instance = super().__new__(cls)
@@ -2595,6 +3038,7 @@ class array(Array[DType]):
         ndim: int | None = None,
         grad: array | None = None,
         requires_grad: builtins.bool = False,
+        retain_grad: builtins.bool = False,
     ):
         """Construct a new Warp array object.
 
@@ -2612,7 +3056,7 @@ class array(Array[DType]):
         ``wp.empty()``, ``wp.zeros()``, or ``wp.full()`` instead to create new arrays.
 
         If none of the above arguments are specified, a simple type annotation is constructed.  This is used when annotating
-        kernel arguments or struct members (e.g.,``arr: wp.array(dtype=float)``).  In this case, only ``dtype`` and ``ndim``
+        kernel arguments or struct members (e.g., ``arr: wp.array[float]``).  In this case, only ``dtype`` and ``ndim``
         are taken into account and no memory is allocated for the array.
 
         Args:
@@ -2627,6 +3071,8 @@ class array(Array[DType]):
                 the incoming ``data`` already lives on the ``device`` specified and the data types match.
             deleter: Function to be called when the array is deleted, taking two arguments: pointer and size
             requires_grad: Whether or not gradients will be tracked for this array, see :class:`warp.Tape` for details
+            retain_grad: Whether to preserve the array's gradient during the backward pass instead of
+                zeroing it after it has been read. Requires ``requires_grad=True``.
             grad: The array in which to accumulate gradients in the backward pass. If ``None`` and ``requires_grad`` is ``True``,
                 then a gradient array will be allocated automatically.
             pinned: Whether to allocate pinned host memory, which allows asynchronous host–device transfers
@@ -2638,6 +3084,7 @@ class array(Array[DType]):
 
         # properties
         self._requires_grad = False
+        self._retain_grad = False
         self._grad = None
         # __array_interface__ or __cuda_array_interface__, evaluated lazily and cached
         self._array_interface = None
@@ -2693,6 +3140,12 @@ class array(Array[DType]):
                 self._requires_grad = requires_grad
                 if requires_grad:
                     self._alloc_grad()
+
+        # initialize retain_grad
+        if retain_grad:
+            if not self._requires_grad:
+                raise ValueError("retain_grad=True requires requires_grad=True")
+            self._retain_grad = True
 
     def _init_from_data(self, data, dtype, shape, device, copy, pinned):
         if not hasattr(data, "__len__"):
@@ -2860,7 +3313,13 @@ class array(Array[DType]):
                 raise RuntimeError(f"Failed to convert input data to an array: {e}") from e
             dtype = np_dtype_to_warp_type.get(arr.dtype)
             if dtype is None:
-                raise RuntimeError(f"Unsupported input data dtype: {arr.dtype}")
+                # Check for ml_dtypes.bfloat16 (not in the static map)
+                ml_bf16 = _get_ml_dtypes_bfloat16()
+                if ml_bf16 is not None and arr.dtype == ml_bf16:
+                    dtype = bfloat16
+                    arr = arr.view(np.uint16)
+                else:
+                    raise RuntimeError(f"Unsupported input data dtype: {arr.dtype}")
         elif isinstance(dtype, warp._src.codegen.Struct):
             if isinstance(data, np.ndarray):
                 # construct from numpy structured array
@@ -2913,7 +3372,21 @@ class array(Array[DType]):
                     f"Failed to convert input data to an array with Warp type {warp._src.context.type_str(dtype)}"
                 )
             try:
-                arr = np.asarray(data, dtype=npdtype)
+                if scalar_dtype is bfloat16:
+                    # bfloat16 is stored as uint16 internally. When the input data is already
+                    # uint16 (e.g. pre-encoded bfloat16 bits from a numpy array), use it directly.
+                    # Also accept ml_dtypes.bfloat16 arrays directly via view.
+                    # Otherwise, convert float values to their bfloat16 bit representation rather
+                    # than just truncating to integer.
+                    ml_bf16 = _get_ml_dtypes_bfloat16()
+                    if isinstance(data, np.ndarray) and data.dtype == np.uint16:
+                        arr = data
+                    elif ml_bf16 is not None and isinstance(data, np.ndarray) and data.dtype == ml_bf16:
+                        arr = data.view(np.uint16)
+                    else:
+                        arr = _np_float32_to_bfloat16_bits(np.asarray(data, dtype=np.float32))
+                else:
+                    arr = np.asarray(data, dtype=npdtype)
             except Exception as e:
                 raise RuntimeError(f"Failed to convert input data to an array with type {npdtype}: {e}") from e
 
@@ -3089,8 +3562,15 @@ class array(Array[DType]):
                 capacity = dtype_size
 
         allocator = device.get_allocator(pinned=pinned)
+        # Resolve the deallocate callable before allocating so a bad descriptor/__getattr__
+        # cannot leak a freshly-allocated pointer between allocate() and self.deleter assignment.
+        deleter = allocator.deallocate
         if capacity > 0:
-            ptr = allocator.alloc(capacity)
+            if device.is_cuda:
+                with device.context_guard:
+                    ptr = allocator.allocate(capacity)
+            else:
+                ptr = allocator.allocate(capacity)
         else:
             ptr = None
 
@@ -3104,7 +3584,7 @@ class array(Array[DType]):
         self.device = device
         self.pinned = pinned if device.is_cpu else False
         self.is_contiguous = is_contiguous
-        self.deleter = allocator.deleter
+        self.deleter = deleter
         self._allocator = allocator
 
     def _init_annotation(self, dtype, ndim):
@@ -3120,6 +3600,10 @@ class array(Array[DType]):
         self.is_contiguous = False
 
     def __del__(self):
+        # Skip deallocation for partially-initialized arrays (e.g. when allocation failed)
+        # and for zero-size arrays which were never allocated.
+        if not hasattr(self, "device") or self.device is None or self.ptr is None:
+            return
         try:
             with self.device.context_guard:
                 self.deleter(self.ptr, self.capacity)
@@ -3369,7 +3853,12 @@ class array(Array[DType]):
         if self.ctype is None:
             data = 0 if self.ptr is None else ctypes.c_uint64(self.ptr)
             grad = 0 if self.grad is None or self.grad.ptr is None else ctypes.c_uint64(self.grad.ptr)
-            self.ctype = array_t(data=data, grad=grad, ndim=self.ndim, shape=self.shape, strides=self.strides)
+            flags = 0
+            if self._retain_grad:
+                flags |= ARRAY_FLAG_RETAIN_GRAD
+            self.ctype = array_t(
+                data=data, grad=grad, ndim=self.ndim, shape=self.shape, strides=self.strides, flags=flags
+            )
 
         return self.ctype
 
@@ -3428,9 +3917,22 @@ class array(Array[DType]):
             self._alloc_grad()
         elif not value:
             self._grad = None
+            self._retain_grad = False
 
         self._requires_grad = value
 
+        # trigger re-creation of C-representation
+        self.ctype = None
+
+    @property
+    def retain_grad(self):
+        return self._retain_grad
+
+    @retain_grad.setter
+    def retain_grad(self, value: builtins.bool):
+        if value and not self._requires_grad:
+            raise ValueError("retain_grad=True requires requires_grad=True")
+        self._retain_grad = value
         # trigger re-creation of C-representation
         self.ctype = None
 
@@ -3477,8 +3979,15 @@ class array(Array[DType]):
                     f"Warning: Array {self} is being written to but has already been read from in a previous launch. This may corrupt gradient computation in the backward pass."
                 )
 
+    def _apic_ensure_tracked(self):
+        """Register this array as a memory region if an APIC capture is active."""
+        apic_capture = getattr(warp._src.context.runtime, "_apic_capture", None)
+        if apic_capture is not None and self.ptr:
+            apic_capture.track_array(self)
+
     def zero_(self):
         """Zero out the array entries."""
+        self._apic_ensure_tracked()
         if self.is_contiguous:
             # simple memset is usually faster than generic fill
             self.device.memset(self.ptr, 0, self.size * type_size_in_bytes(self.dtype))
@@ -3516,6 +4025,8 @@ class array(Array[DType]):
         if self.size == 0:
             return
 
+        self._apic_ensure_tracked()
+
         # try to convert the given value to the array dtype
         try:
             if isinstance(self.dtype, warp._src.codegen.Struct):
@@ -3535,8 +4046,9 @@ class array(Array[DType]):
                 # scalar
                 if type(value) in scalar_types:
                     value = value.value
-                if self.dtype is float16:
-                    cvalue = self.dtype._type_(float_to_half_bits(value))
+                if _is_bit_converted_float(self.dtype):
+                    import_fn = float_to_half_bits if self.dtype is float16 else float_to_bfloat16_bits
+                    cvalue = self.dtype._type_(import_fn(value))
                 else:
                     cvalue = self.dtype._type_(value)
         except Exception as e:
@@ -3568,18 +4080,36 @@ class array(Array[DType]):
         else:
             warp.copy(self, array(data=src, dtype=self.dtype, copy=False, device="cpu"))
 
-    def numpy(self):
+    def numpy(self, *, _suppress_bfloat16_warning=False):
         """Convert the array to a :class:`numpy.ndarray` (aliasing memory through the array interface protocol)
         If the array is on the GPU, a synchronous device-to-host copy (on the CUDA default stream) will be
         automatically performed to ensure that any outstanding work is completed.
         """
+        # Determine if this array contains bfloat16 data (scalar or compound type)
+        is_bf16 = self.dtype is bfloat16 or (
+            isinstance(self.dtype, type)
+            and issubclass(self.dtype, ctypes.Array)
+            and self.dtype._wp_scalar_type_ is bfloat16
+        )
+
+        if is_bf16 and not _suppress_bfloat16_warning:
+            ml_bf16 = _get_ml_dtypes_bfloat16()
+            if ml_bf16 is None:
+                warp._src.utils.warn(
+                    "bfloat16 arrays are returned as np.uint16 (raw bit representation) "
+                    "because NumPy does not natively support bfloat16. "
+                    "Use wp.to_torch() or wp.to_jax() for frameworks that support bfloat16 natively, "
+                    "or install ml-dtypes for a NumPy bfloat16 dtype.",
+                    once=True,
+                )
+
         if self.ptr:
             # use the CUDA default stream for synchronous behaviour with other streams
             with warp.ScopedStream(self.device.null_stream):
                 a = self.to("cpu", requires_grad=False)
             # convert through __array_interface__
             # Note: this handles arrays of structs using `descr`, so the result will be a structured NumPy array
-            return np.asarray(a)
+            result = np.asarray(a)
         else:
             # return an empty numpy array with the correct dtype and shape
             if isinstance(self.dtype, warp._src.codegen.Struct):
@@ -3591,7 +4121,15 @@ class array(Array[DType]):
             else:
                 npdtype = warp_type_to_np_dtype[self.dtype]
                 npshape = self.shape
-            return np.empty(npshape, dtype=npdtype)
+            result = np.empty(npshape, dtype=npdtype)
+
+        # If ml_dtypes is available, view as bfloat16 instead of returning raw uint16
+        if is_bf16:
+            ml_bf16 = _get_ml_dtypes_bfloat16()
+            if ml_bf16 is not None:
+                result = result.view(ml_bf16)
+
+        return result
 
     def cptr(self):
         """Return a ctypes cast of the array address.
@@ -3623,7 +4161,7 @@ class array(Array[DType]):
 
     def list(self):
         """Return a flattened list of items in the array as a Python list."""
-        a = self.numpy()
+        a = self.numpy(_suppress_bfloat16_warning=True)
 
         if isinstance(self.dtype, warp._src.codegen.Struct):
             # struct
@@ -3637,6 +4175,14 @@ class array(Array[DType]):
             data = a.ctypes.data
             stride = a.strides[0]
             return [self.dtype.from_ptr(data + i * stride) for i in range(self.size)]
+        elif self.dtype is bfloat16:
+            # When ml_dtypes is available, .numpy() returns ml_dtypes.bfloat16 values
+            # that can be converted to float directly. Otherwise, it returns uint16 (raw bits)
+            # that need bit-level conversion.
+            ml_bf16 = _get_ml_dtypes_bfloat16()
+            if ml_bf16 is not None:
+                return [bfloat16(float(x)) for x in a.flatten()]
+            return [bfloat16(bfloat16_bits_to_float(int(x))) for x in a.flatten()]
         else:
             # scalar
             return a.flatten().tolist()
@@ -3846,7 +4392,7 @@ class array(Array[DType]):
         Note: The transpose operation will return an array with a non-contiguous access pattern.
 
         Args:
-            axes (optional): Specifies the how the axes are permuted. If not specified, the axes order will be reversed.
+            axes: Specifies how the axes are permuted. If not specified, the axes order will be reversed.
         """
         # noop if 1d array
         if self.ndim == 1:
@@ -3935,28 +4481,64 @@ class array(Array[DType]):
 
 
 # aliases for arrays with small dimensions
-def array1d(*args, **kwargs):
+class array1d(Array[DType, NDim]):
     """Create or annotate a 1-dimensional :class:`warp.array`."""
-    kwargs["ndim"] = 1
-    return array(*args, **kwargs)
+
+    def __new__(cls, *args, **kwargs):
+        kwargs["ndim"] = 1
+        return array(*args, **kwargs)
+
+    @classmethod
+    def __class_getitem__(cls, dtype):
+        """Support wp.array1d[dtype] syntax."""
+        if isinstance(dtype, tuple):
+            raise TypeError(f"wp.{cls.__name__} expects a single type parameter (dtype), got {len(dtype)}")
+        return _ArrayAnnotation(dtype=dtype, ndim=1)
 
 
-def array2d(*args, **kwargs):
+class array2d(Array[DType, NDim]):
     """Create or annotate a 2-dimensional :class:`warp.array`."""
-    kwargs["ndim"] = 2
-    return array(*args, **kwargs)
+
+    def __new__(cls, *args, **kwargs):
+        kwargs["ndim"] = 2
+        return array(*args, **kwargs)
+
+    @classmethod
+    def __class_getitem__(cls, dtype):
+        """Support wp.array2d[dtype] syntax."""
+        if isinstance(dtype, tuple):
+            raise TypeError(f"wp.{cls.__name__} expects a single type parameter (dtype), got {len(dtype)}")
+        return _ArrayAnnotation(dtype=dtype, ndim=2)
 
 
-def array3d(*args, **kwargs):
+class array3d(Array[DType, NDim]):
     """Create or annotate a 3-dimensional :class:`warp.array`."""
-    kwargs["ndim"] = 3
-    return array(*args, **kwargs)
+
+    def __new__(cls, *args, **kwargs):
+        kwargs["ndim"] = 3
+        return array(*args, **kwargs)
+
+    @classmethod
+    def __class_getitem__(cls, dtype):
+        """Support wp.array3d[dtype] syntax."""
+        if isinstance(dtype, tuple):
+            raise TypeError(f"wp.{cls.__name__} expects a single type parameter (dtype), got {len(dtype)}")
+        return _ArrayAnnotation(dtype=dtype, ndim=3)
 
 
-def array4d(*args, **kwargs):
+class array4d(Array[DType, NDim]):
     """Create or annotate a 4-dimensional :class:`warp.array`."""
-    kwargs["ndim"] = 4
-    return array(*args, **kwargs)
+
+    def __new__(cls, *args, **kwargs):
+        kwargs["ndim"] = 4
+        return array(*args, **kwargs)
+
+    @classmethod
+    def __class_getitem__(cls, dtype):
+        """Support wp.array4d[dtype] syntax."""
+        if isinstance(dtype, tuple):
+            raise TypeError(f"wp.{cls.__name__} expects a single type parameter (dtype), got {len(dtype)}")
+        return _ArrayAnnotation(dtype=dtype, ndim=4)
 
 
 def from_ptr(ptr, length, dtype=None, shape=None, device=None):
@@ -3965,7 +4547,6 @@ def from_ptr(ptr, length, dtype=None, shape=None, device=None):
     .. deprecated::
         Use the :class:`array` constructor with a ``ptr`` argument instead.
 
-    For OmniGraph applications, use :func:`from_omni_graph_ptr`.
     To create an array from a C pointer, use the :class:`array` constructor
     with the ``ptr`` argument as a ``uint64`` representing the memory address.
 
@@ -4098,7 +4679,7 @@ class fixedarray(array):
 
 # A base class for non-contiguous arrays, providing the implementation of common methods like
 # contiguous(), to(), numpy(), list(), assign(), zero_(), and fill_().
-class noncontiguous_array_base(Array[T]):
+class noncontiguous_array_base(Array[DType, NDim]):
     def __init__(self, array_type_id):
         self.type_id = array_type_id
         self.is_contiguous = False
@@ -4162,8 +4743,9 @@ class noncontiguous_array_base(Array[T]):
                 # scalar
                 if type(value) in scalar_types:
                     value = value.value
-                if self.dtype is float16:
-                    cvalue = self.dtype._type_(float_to_half_bits(value))
+                if _is_bit_converted_float(self.dtype):
+                    import_fn = float_to_half_bits if self.dtype is float16 else float_to_bfloat16_bits
+                    cvalue = self.dtype._type_(import_fn(value))
                 else:
                     cvalue = self.dtype._type_(value)
         except Exception as e:
@@ -4195,12 +4777,17 @@ def check_index_array(indices, expected_device):
         raise ValueError(f"Index array device ({indices.device} does not match data array device ({expected_device}))")
 
 
-class indexedarray(noncontiguous_array_base):
+class indexedarray(noncontiguous_array_base[DType, NDim]):
     """Array providing indexed access to a subset of elements in a source :class:`warp.array`."""
 
     # member attributes available during code-gen (e.g.: d = arr.shape[0])
     # (initialized when needed)
     _vars = None
+
+    @classmethod
+    def __class_getitem__(cls, params):
+        """Support ``wp.indexedarray[dtype]`` and ``wp.indexedarray[dtype, Literal[ndim]]`` syntax."""
+        return _parse_array_subscript(cls, params)
 
     def __init__(
         self,
@@ -4324,25 +4911,191 @@ def indexedarray4d(*args, **kwargs):
     return indexedarray(*args, **kwargs)
 
 
-from warp._src.fabric import fabricarray, indexedfabricarray  # noqa: E402
+from warp._src.fabric import fabricarray, fabricarray_t, indexedfabricarray, indexedfabricarray_t  # noqa: E402
 
 array_types = (array, indexedarray, fabricarray, indexedfabricarray, fixedarray)
 
 
+# ---------------------------------------------------------------------------
+# Lightweight array annotation classes
+# ---------------------------------------------------------------------------
+# Defined here (after ``array``, ``indexedarray``, ``fabricarray``, and
+# ``indexedfabricarray``) so that ``_concrete_cls`` can be set directly
+# rather than requiring deferred wiring.
+
+
+class _ArrayAnnotationBase:
+    """Lightweight descriptor for array type annotations.
+
+    Unlike full ``array``/``indexedarray`` instances, these carry only the
+    metadata that codegen needs (``.dtype``, ``.ndim``, ``.vars``,
+    ``.__ctype__()``), with no device management overhead.
+    """
+
+    __slots__ = ("dtype", "ndim")
+    # Subclasses must set _concrete_cls to the corresponding array class.
+
+    def __init__(self, dtype, ndim=1):
+        self.dtype = dtype if dtype is Any else type_to_warp(dtype)
+        self.ndim = ndim
+
+    def __repr__(self):
+        if self.dtype is Any:
+            dtype_str = "Any"
+        elif hasattr(self.dtype, "key"):
+            # Struct instances use .key instead of __name__
+            dtype_str = self.dtype.key
+        else:
+            name = getattr(self.dtype, "__name__", None)
+            if name and getattr(warp, name, None) is self.dtype:
+                dtype_str = f"wp.{name}"
+            else:
+                # Custom vector/matrix/quaternion/transformation types
+                repr_name = type_repr(self.dtype)
+                if getattr(warp, repr_name, None) is not None:
+                    dtype_str = f"wp.{repr_name}"
+                else:
+                    dtype_str = repr_name
+        ndim_str = "Any" if self.ndim is Any else self.ndim
+        return f"wp.{self._concrete_cls.__name__}(dtype={dtype_str}, ndim={ndim_str})"
+
+    def __eq__(self, other):
+        if isinstance(other, _ArrayAnnotationBase):
+            return self._concrete_cls is other._concrete_cls and self.dtype == other.dtype and self.ndim == other.ndim
+        return NotImplemented
+
+    def __hash__(self):
+        return hash((self._concrete_cls, self.dtype, self.ndim))
+
+
+class _ArrayAnnotation(_ArrayAnnotationBase):
+    """Lightweight annotation for :class:`array` types."""
+
+    __slots__ = ("_vars_cache",)
+    _concrete_cls = array
+
+    def __init__(self, dtype, ndim=1):
+        super().__init__(dtype, ndim)
+        self._vars_cache = None
+
+    @property
+    def vars(self):
+        if self._vars_cache is None:
+            self._vars_cache = {
+                "shape": warp._src.codegen.Var("shape", shape_t),
+                "ptr": warp._src.codegen.Var("data", pointer_t(self.dtype)),
+            }
+        return self._vars_cache
+
+    def __ctype__(self):
+        return array_t()
+
+
+class _IndexedArrayAnnotation(_ArrayAnnotationBase):
+    """Lightweight annotation for :class:`indexedarray` types."""
+
+    __slots__ = ()
+    _concrete_cls = indexedarray
+    _vars = None
+
+    @property
+    def vars(self):
+        if _IndexedArrayAnnotation._vars is None:
+            _IndexedArrayAnnotation._vars = {"shape": warp._src.codegen.Var("shape", shape_t)}
+        return _IndexedArrayAnnotation._vars
+
+    def __ctype__(self):
+        ndim = 1 if self.ndim is Any else self.ndim
+        return indexedarray_t(None, [None] * ARRAY_MAX_DIMS, (0,) * ndim)
+
+
+class _FabricAnnotationBase(_ArrayAnnotationBase):
+    """Shared base for fabric array annotation classes.
+
+    Both :class:`fabricarray` and :class:`indexedfabricarray` expose only a
+    ``size`` var (unlike regular arrays which also expose ``shape`` and ``ptr``).
+    """
+
+    __slots__ = ()
+    _vars = None
+
+    @property
+    def vars(self):
+        cls = type(self)
+        if cls._vars is None:
+            cls._vars = {"size": warp._src.codegen.Var("size", uint64)}
+        return cls._vars
+
+
+class _FabricArrayAnnotation(_FabricAnnotationBase):
+    """Lightweight annotation for :class:`fabricarray` types."""
+
+    __slots__ = ()
+    _concrete_cls = fabricarray
+
+    def __ctype__(self):
+        return fabricarray_t()
+
+
+class _IndexedFabricArrayAnnotation(_FabricAnnotationBase):
+    """Lightweight annotation for :class:`indexedfabricarray` types."""
+
+    __slots__ = ()
+    _concrete_cls = indexedfabricarray
+
+    def __ctype__(self):
+        return indexedfabricarray_t()
+
+
+# Mapping from concrete array class → lightweight annotation class.
+_ARRAY_ANNOTATION_MAP = {
+    array: _ArrayAnnotation,
+    indexedarray: _IndexedArrayAnnotation,
+    fabricarray: _FabricArrayAnnotation,
+    indexedfabricarray: _IndexedFabricArrayAnnotation,
+}
+
+
+def _parse_array_subscript(cls, params):
+    """Parse subscript parameters for array-like types.
+
+    Supports ``cls[dtype]`` and ``cls[dtype, Literal[ndim]]`` syntax.
+    Returns a lightweight annotation object (not a full ``cls`` instance).
+    """
+    ann_cls = _ARRAY_ANNOTATION_MAP.get(cls)
+    if ann_cls is None:
+        raise TypeError(f"Subscript syntax not supported for {cls.__name__}")
+
+    if not isinstance(params, tuple):
+        return ann_cls(dtype=params, ndim=1)
+
+    if len(params) == 2:
+        dtype, ndim = params
+        ndim = _unwrap_literal(ndim)
+        if ndim is not Any:
+            if not isinstance(ndim, int):
+                raise TypeError(f"ndim must be an integer, got {ndim!r}")
+            if ndim < 1 or ndim > ARRAY_MAX_DIMS:
+                raise ValueError(f"ndim must be between 1 and {ARRAY_MAX_DIMS}, got {ndim}")
+        return ann_cls(dtype=dtype, ndim=ndim)
+
+    raise TypeError(f"wp.{cls.__name__} expects 1 or 2 type parameters, got {len(params)}")
+
+
 def array_type_id(a):
-    if isinstance(a, array):
+    if matches_array_class(a, array):
         return ARRAY_TYPE_REGULAR
-    elif isinstance(a, indexedarray):
+    elif matches_array_class(a, indexedarray):
         return ARRAY_TYPE_INDEXED
-    elif isinstance(a, fabricarray):
+    elif matches_array_class(a, fabricarray):
         return ARRAY_TYPE_FABRIC
-    elif isinstance(a, indexedfabricarray):
+    elif matches_array_class(a, indexedfabricarray):
         return ARRAY_TYPE_FABRIC_INDEXED
     else:
         raise ValueError("Invalid array type")
 
 
-class tile(Tile[DType, Shape]):
+class tile(Tile):
     """A Warp tile object.
 
     Attributes:
@@ -4356,6 +5109,34 @@ class tile(Tile[DType, Shape]):
     """
 
     alignment = 16
+
+    @classmethod
+    def __class_getitem__(cls, params):
+        """Support ``wp.tile[dtype]``, ``wp.tile[dtype, M, N]``, and ``wp.tile[dtype, (M, N)]`` syntax."""
+        if not isinstance(params, tuple):
+            return cls(dtype=params, shape=Any)
+
+        if len(params) == 0:
+            raise TypeError("wp.tile requires at least a dtype parameter")
+
+        dtype = params[0]
+        rest = params[1:]
+
+        # dtype-only with trailing comma: wp.tile[float,] → same as wp.tile[float]
+        if not rest:
+            return cls(dtype=dtype, shape=Any)
+
+        # Flatten a single tuple argument: wp.tile[float, (M, N)] -> (M, N)
+        if len(rest) == 1 and isinstance(rest[0], tuple):
+            rest = rest[0]
+
+        shape = tuple(_unwrap_literal(s) for s in rest)
+
+        for i, dim in enumerate(shape):
+            if not isinstance(dim, int) or dim <= 0:
+                raise TypeError(f"Tile dimension {i} must be a positive integer, got {dim!r}")
+
+        return cls(dtype=dtype, shape=shape)
 
     def __init__(
         self,
@@ -4444,7 +5225,70 @@ def is_tile(t):
     return isinstance(t, tile)
 
 
-bvh_constructor_values = {"sah": 0, "median": 1, "lbvh": 2}
+class tile_stack(TileStack):
+    """A Warp tile stack object.
+
+    Attributes:
+        dtype (DType): The data type of the stack elements
+        capacity (int): Maximum number of elements
+    """
+
+    def __init__(self, dtype, capacity):
+        # Allow Any for stub generation (pyi); validate otherwise
+        if capacity is not Any:
+            if isinstance(capacity, (bool, float, str)):
+                raise ValueError(f"capacity must be a positive integer, got {capacity}")
+            try:
+                capacity = int(capacity)
+            except (TypeError, ValueError):
+                raise ValueError(f"capacity must be a positive integer, got {capacity}") from None
+            if capacity <= 0:
+                raise ValueError(f"capacity must be a positive integer, got {capacity}")
+        self.dtype = type_to_warp(dtype)
+        self.capacity = capacity
+
+    def ctype(self):
+        from warp._src.codegen import Var  # noqa: PLC0415
+
+        return f"wp::tile_stack_t<{Var.type_to_ctype(self.dtype)}, {self.capacity}>"
+
+    def cinit(self):
+        from warp._src.codegen import Var  # noqa: PLC0415
+
+        return f"wp::tile_stack_alloc<{Var.type_to_ctype(self.dtype)}, {self.capacity}>()"
+
+    def __repr__(self):
+        return f"tile_stack(dtype={self.dtype}, capacity={self.capacity})"
+
+    def size_in_bytes(self):
+        return tile.round_up(type_size_in_bytes(self.dtype) * self.capacity) + tile.round_up(4)  # data + count
+
+
+def is_tile_stack(t):
+    """Return ``True`` if the value is a tile_stack instance."""
+    return isinstance(t, tile_stack)
+
+
+class BvhConstructor(enum.IntEnum):
+    """BVH construction algorithm selection."""
+
+    SAH = 0
+    """CPU-based top-down constructor using Surface Area Heuristics."""
+    MEDIAN = 1
+    """CPU-based top-down constructor splitting on median centroids."""
+    LBVH = 2
+    """GPU-based bottom-up constructor maximizing parallelism."""
+    CUBQL = -1
+    """cuBQL library constructor (Mesh only)."""
+
+    @classmethod
+    def from_str(cls, value: str) -> BvhConstructor:
+        try:
+            return cls[value.upper()]
+        except KeyError:
+            raise ValueError(
+                f"Unknown BVH constructor '{value}', expected one of: {', '.join(m.name.lower() for m in cls)}"
+            ) from None
 
 
 class Bvh:
@@ -4459,7 +5303,7 @@ class Bvh:
         self,
         lowers: array,
         uppers: array,
-        constructor: str | None = None,
+        constructor: BvhConstructor | str | None = None,
         groups: array | None = None,
         leaf_size: int = 1,
     ):
@@ -4573,28 +5417,31 @@ class Bvh:
 
         if constructor is None:
             if self.device.is_cpu:
-                constructor = "sah"
+                constructor = BvhConstructor.SAH
             else:
-                constructor = "lbvh"
+                constructor = BvhConstructor.LBVH
 
-        if constructor not in bvh_constructor_values:
-            raise ValueError(f"Unrecognized BVH constructor type: {constructor}")
+        if not isinstance(constructor, BvhConstructor):
+            constructor = BvhConstructor.from_str(constructor)
+
+        if constructor == BvhConstructor.CUBQL:
+            raise ValueError("CUBQL constructor is not available for wp.Bvh")
 
         if leaf_size < 1:
             raise ValueError(f"leaf_size must be greater than or equal to 1, current value: {leaf_size}")
 
         if self.device.is_cpu:
-            if constructor == "lbvh":
-                warp.utils.warn(
+            if constructor == BvhConstructor.LBVH:
+                warp._src.utils.warn(
                     "LBVH constructor is not available for a CPU tree. Falling back to SAH constructor.", stacklevel=2
                 )
-                constructor = "sah"
+                constructor = BvhConstructor.SAH
 
             self.id = self.runtime.core.wp_bvh_create_host(
                 get_data(lowers),
                 get_data(uppers),
                 len(lowers),
-                bvh_constructor_values[constructor],
+                constructor,
                 get_data(groups),
                 leaf_size,
             )
@@ -4604,7 +5451,7 @@ class Bvh:
                 get_data(lowers),
                 get_data(uppers),
                 len(lowers),
-                bvh_constructor_values[constructor],
+                constructor,
                 get_data(groups),
                 leaf_size,
             )
@@ -4664,25 +5511,29 @@ class Bvh:
         Raises:
             ValueError: If an unknown constructor is provided.
         """
+
         if constructor is None:
             if self.device.is_cpu:
-                constructor = "sah"
+                constructor = BvhConstructor.SAH
             else:
-                constructor = "lbvh"
+                constructor = BvhConstructor.LBVH
 
-        if constructor not in bvh_constructor_values:
-            raise ValueError(f"Unrecognized BVH constructor type: {constructor}")
+        if not isinstance(constructor, BvhConstructor):
+            constructor = BvhConstructor.from_str(constructor)
+
+        if constructor == BvhConstructor.CUBQL:
+            raise ValueError("CUBQL constructor is not available for wp.Bvh")
 
         if self.device.is_cpu:
-            if constructor == "lbvh":
-                warp.utils.warn(
+            if constructor == BvhConstructor.LBVH:
+                warp._src.utils.warn(
                     "LBVH constructor is not available for a CPU tree. Falling back to SAH constructor.", stacklevel=2
                 )
-                constructor = "sah"
-            self.runtime.core.wp_bvh_rebuild_host(self.id, bvh_constructor_values[constructor])
+                constructor = BvhConstructor.SAH
+            self.runtime.core.wp_bvh_rebuild_host(self.id, constructor)
         else:
-            if constructor != "lbvh":
-                warp.utils.warn(
+            if constructor != BvhConstructor.LBVH:
+                warp._src.utils.warn(
                     "In-place rebuild method on the CUDA device only supports LBVH constructor. Falling back to LBVH constructor.",
                     stacklevel=2,
                 )
@@ -4712,8 +5563,8 @@ class Mesh:
         indices: array,
         velocities: array | None = None,
         support_winding_number: builtins.bool = False,
-        bvh_constructor: str | None = None,
-        bvh_leaf_size: int = 4,
+        bvh_constructor: BvhConstructor | str | None = None,
+        bvh_leaf_size: int | None = None,
         groups: array | None = None,
     ):
         """Class representing a triangle mesh.
@@ -4731,9 +5582,12 @@ class Mesh:
               data structures to support ``wp.mesh_query_point_sign_winding_number()`` queries.
             bvh_constructor: The construction algorithm for the underlying BVH
               (see the docstring of :class:`Bvh` for explanation).
-              Valid choices are ``"sah"``, ``"median"``, ``"lbvh"``, or ``None``.
+              Valid choices are ``"sah"``, ``"median"``, ``"lbvh"``, ``"cubql"``, or ``None``.
+              When ``"cubql"`` is selected (**experimental**), only ray query APIs are supported.
+              All other queries will silently return no results.
             bvh_leaf_size: The number of primitives (AABBs) stored in each leaf node
-              (see the docstring of :class:`Bvh` for more details).
+              (see the docstring of :class:`Bvh` for more details). If ``None`` the default
+              value based on the ``bvh_constructor`` will be used.
             groups: Optional array of triangle group indices of data type :class:`warp.int32`.
               Should be a 1D array with shape ``(num_tris)``.
         """
@@ -4769,22 +5623,34 @@ class Mesh:
 
         if bvh_constructor is None:
             if self.device.is_cpu:
-                bvh_constructor = "sah"
+                bvh_constructor = BvhConstructor.SAH
             else:
-                bvh_constructor = "lbvh"
+                bvh_constructor = BvhConstructor.LBVH
 
-        if bvh_constructor not in bvh_constructor_values:
-            raise ValueError(f"Unrecognized BVH constructor type: {bvh_constructor}")
+        if not isinstance(bvh_constructor, BvhConstructor):
+            bvh_constructor = BvhConstructor.from_str(bvh_constructor)
 
-        if bvh_leaf_size < 1:
-            raise ValueError(f"bvh_leaf_size must be greater than or equal to 1, current value: {bvh_leaf_size}")
+        if bvh_constructor == BvhConstructor.CUBQL:
+            if groups is not None:
+                raise RuntimeError("Grouped mesh queries are not supported with bvh_constructor='cubql'")
+            if support_winding_number:
+                raise RuntimeError("support_winding_number=True is not supported with bvh_constructor='cubql'")
+            if bvh_leaf_size is None:
+                bvh_leaf_size = 0
+            elif bvh_leaf_size < 0:
+                raise ValueError(f"bvh_leaf_size must be greater than or equal to 0, current value: {bvh_leaf_size}")
+        else:
+            if bvh_leaf_size is None:
+                bvh_leaf_size = 4
+            elif bvh_leaf_size < 1:
+                raise ValueError(f"bvh_leaf_size must be greater than or equal to 1, current value: {bvh_leaf_size}")
 
         if self.device.is_cpu:
-            if bvh_constructor == "lbvh":
+            if bvh_constructor == BvhConstructor.LBVH:
                 warp._src.utils.warn(
                     "LBVH constructor is not available for a CPU tree. Falling back to SAH constructor.", stacklevel=2
                 )
-                bvh_constructor = "sah"
+                bvh_constructor = BvhConstructor.SAH
 
             self.id = self.runtime.core.wp_mesh_create_host(
                 points.__ctype__(),
@@ -4793,7 +5659,7 @@ class Mesh:
                 len(points),
                 int(indices.size // 3),
                 int(support_winding_number),
-                bvh_constructor_values[bvh_constructor],
+                bvh_constructor,
                 ctypes.c_void_p(groups.ptr) if groups else ctypes.c_void_p(0),
                 bvh_leaf_size,
             )
@@ -4806,7 +5672,7 @@ class Mesh:
                 len(points),
                 int(indices.size // 3),
                 int(support_winding_number),
-                bvh_constructor_values[bvh_constructor],
+                bvh_constructor,
                 ctypes.c_void_p(groups.ptr) if groups else ctypes.c_void_p(0),
                 bvh_leaf_size,
             )
@@ -5499,7 +6365,12 @@ class Volume:
 
     @classmethod
     def load_from_numpy(
-        cls, ndarray: np.ndarray, min_world=(0.0, 0.0, 0.0), voxel_size=1.0, bg_value=0.0, device=None
+        cls,
+        ndarray: np.ndarray,
+        min_world=(0.0, 0.0, 0.0),
+        voxel_size: int | float | list[float] | tuple[float, float, float] = 1.0,
+        bg_value=0.0,
+        device: warp.DeviceLike = None,
     ) -> Volume:
         """Create a :class:`Volume` object from a dense 3D NumPy array.
 
@@ -5507,14 +6378,17 @@ class Volume:
 
         Args:
             min_world: The 3D coordinate of the lower corner of the volume.
-            voxel_size: The size of each voxel in spatial coordinates.
+            voxel_size: The size of each voxel in spatial
+                coordinates. Can be a scalar for isotropic voxels or a 3-element
+                sequence ``(sx, sy, sz)`` for anisotropic voxels.
             bg_value: Background value
-            device: The CUDA device to create the volume on, e.g.: "cuda" or "cuda:0".
+            device: The CUDA device to create the volume on, e.g.: ``"cuda"`` or ``"cuda:0"``.
 
         Returns:
-
             A ``warp.Volume`` object.
         """
+        voxel_size = cls._normalize_voxel_size(voxel_size)
+
         target_shape = (
             math.ceil(ndarray.shape[0] / 8) * 8,
             math.ceil(ndarray.shape[1] / 8) * 8,
@@ -5546,9 +6420,9 @@ class Volume:
         volume = warp.Volume.allocate(
             min_world,
             [
-                min_world[0] + (shape[0] - 1) * voxel_size,
-                min_world[1] + (shape[1] - 1) * voxel_size,
-                min_world[2] + (shape[2] - 1) * voxel_size,
+                min_world[0] + (shape[0] - 1) * voxel_size[0],
+                min_world[1] + (shape[1] - 1) * voxel_size[1],
+                min_world[2] + (shape[2] - 1) * voxel_size[2],
             ],
             voxel_size,
             bg_value=bg_value,
@@ -5587,7 +6461,7 @@ class Volume:
         cls,
         min: list[int],
         max: list[int],
-        voxel_size: float,
+        voxel_size: int | float | list[float] | tuple[float, float, float],
         bg_value=0.0,
         translation=(0.0, 0.0, 0.0),
         points_in_world_space=False,
@@ -5598,24 +6472,28 @@ class Volume:
         This function is only supported for CUDA devices.
 
         Allocate a volume that is large enough to contain voxels [min[0], min[1], min[2]] - [max[0], max[1], max[2]], inclusive.
-        If points_in_world_space is true, then min and max are first converted to index space with the given voxel size and
-        translation, and the volume is allocated with those.
+        If points_in_world_space is true, then min and max are first converted to index space using the given voxel size
+        (per-axis for anisotropic volumes) and translation, and the volume is allocated with those.
 
         The smallest unit of allocation is a dense tile of 8x8x8 voxels, the requested bounding box is rounded up to tiles, and
         the resulting tiles will be available in the new volume.
 
         Args:
-            min (array-like): Lower 3D coordinates of the bounding box in index space or world space, inclusive.
-            max (array-like): Upper 3D coordinates of the bounding box in index space or world space, inclusive.
-            voxel_size: Voxel size of the new volume.
-            bg_value (float or array-like): Value of unallocated voxels of the volume, also defines the volume's type,
+            min: Lower 3D coordinates of the bounding box in index space or world space, inclusive.
+            max: Upper 3D coordinates of the bounding box in index space or world space, inclusive.
+            voxel_size: Voxel size(s) of the new volume. Can be a scalar for isotropic
+                voxels or a 3-element sequence ``(sx, sy, sz)`` for anisotropic voxels.
+            bg_value: Value of unallocated voxels of the volume, also defines the volume's type,
               a :class:`warp.vec3` volume is created if this is `array-like`, otherwise a float volume is created
-            translation (array-like): Translation between the index and world spaces.
+            translation: Translation between the index and world spaces.
             device: The CUDA device to create the volume on, e.g.: ``"cuda"`` or ``"cuda:0"``.
         """
+        voxel_size = cls._normalize_voxel_size(voxel_size)
+
         if points_in_world_space:
-            min = np.around((np.array(min, dtype=np.float32) - translation) / voxel_size)
-            max = np.around((np.array(max, dtype=np.float32) - translation) / voxel_size)
+            vs = np.asarray(voxel_size, dtype=np.float32)
+            min = np.around((np.array(min, dtype=np.float32) - translation) / vs)
+            max = np.around((np.array(max, dtype=np.float32) - translation) / vs)
 
         tile_min = np.array(min, dtype=np.int32) // 8
         tile_max = np.array(max, dtype=np.int32) // 8
@@ -5633,6 +6511,35 @@ class Volume:
         return cls.allocate_by_tiles(tile_points, voxel_size, bg_value, translation, device)
 
     @staticmethod
+    def _normalize_voxel_size(
+        voxel_size: int | float | np.floating | np.integer | list[float] | tuple[float, float, float] | np.ndarray,
+    ) -> tuple[float, float, float]:
+        """Return *voxel_size* as a validated 3-tuple of positive, finite floats.
+
+        Accepts a scalar (Python numeric or NumPy scalar) or a 3-element
+        sequence and always returns a ``(float, float, float)`` tuple.
+
+        Raises:
+            TypeError: If *voxel_size* is not a numeric scalar or sequence.
+            ValueError: If the sequence length is not 3, or any component
+                is zero, negative, or non-finite.
+        """
+        if isinstance(voxel_size, (int, float, np.floating, np.integer)):
+            s = float(voxel_size)
+            voxel_size = (s, s, s)
+        elif isinstance(voxel_size, (list, tuple, np.ndarray, ctypes.Array)):
+            voxel_size = tuple(float(v) for v in voxel_size)
+            if len(voxel_size) != 3:
+                raise ValueError(f"voxel_size must be a scalar or a 3-element sequence, got length {len(voxel_size)}")
+        else:
+            raise TypeError(
+                f"voxel_size must be a numeric scalar or a sequence of 3 floats, got {type(voxel_size).__name__}"
+            )
+        if not all(math.isfinite(v) and v > 0.0 for v in voxel_size):
+            raise ValueError(f"All voxel_size components must be finite and positive, got {voxel_size}")
+        return voxel_size
+
+    @staticmethod
     def _fill_transform_buffers(
         voxel_size: float | list[float] | tuple[float, float, float] | None,
         translation: list[float] | tuple[float, float, float],
@@ -5642,8 +6549,7 @@ class Volume:
             if voxel_size is None:
                 raise ValueError("Either 'voxel_size' or 'transform' must be provided")
 
-            if isinstance(voxel_size, float):
-                voxel_size = (voxel_size, voxel_size, voxel_size)
+            voxel_size = Volume._normalize_voxel_size(voxel_size)
             transform = mat33f(voxel_size[0], 0.0, 0.0, 0.0, voxel_size[1], 0.0, 0.0, 0.0, voxel_size[2])
         else:
             if voxel_size is not None:
@@ -5664,7 +6570,7 @@ class Volume:
     def allocate_by_tiles(
         cls,
         tile_points: array,
-        voxel_size: float | list[float] | None = None,
+        voxel_size: int | float | list[float] | tuple[float, float, float] | None = None,
         bg_value=0.0,
         translation=(0.0, 0.0, 0.0),
         device: warp.DeviceLike = None,
@@ -5687,12 +6593,12 @@ class Volume:
               The array may use an integer scalar type (2D N-by-3 array of :class:`warp.int32` or 1D array of :class:`warp.vec3i` values), indicating index space positions,
               or a floating point scalar type (2D N-by-3 array of :class:`warp.float32` or 1D array of :class:`warp.vec3f` values), indicating world space positions.
               Repeated points per tile are allowed and will be efficiently deduplicated.
-            voxel_size (float or array-like): Voxel size(s) of the new volume. Ignored if ``transform`` is given.
-            bg_value (array-like, scalar or None): Value of unallocated voxels of the volume, also defines the volume's type.
+            voxel_size: Voxel size(s) of the new volume. Ignored if ``transform`` is given.
+            bg_value: Value of unallocated voxels of the volume, also defines the volume's type.
               An index volume will be created if ``bg_value`` is ``None``.
               Other supported grid types are ``int``, ``float``, ``vec3f``, and ``vec4f``.
-            translation (array-like): Translation between the index and world spaces.
-            transform (array-like): Linear transform between the index and world spaces.
+            translation: Translation between the index and world spaces.
+            transform: Linear transform between the index and world spaces.
               If ``None``, deduced from ``voxel_size``.
             device: The CUDA device to create the volume on, e.g. ``"cuda"`` or ``"cuda:0"``.
 
@@ -5775,7 +6681,7 @@ class Volume:
     def allocate_by_voxels(
         cls,
         voxel_points: array,
-        voxel_size: float | list[float] | None = None,
+        voxel_size: int | float | list[float] | tuple[float, float, float] | None = None,
         translation=(0.0, 0.0, 0.0),
         device: warp.DeviceLike = None,
         transform=None,
@@ -5793,9 +6699,9 @@ class Volume:
                 The array may use an integer scalar type (2D N-by-3 array of :class:`warp.int32` or 1D array of :class:`warp.vec3i` values), indicating index space positions,
                 or a floating point scalar type (2D N-by-3 array of :class:`warp.float32` or 1D array of :class:`warp.vec3f` values), indicating world space positions.
                 Repeated points per tile are allowed and will be efficiently deduplicated.
-            voxel_size (float or array-like): Voxel size(s) of the new volume. Ignored if ``transform`` is given.
-            translation (array-like): Translation between the index and world spaces.
-            transform (array-like): Linear transform between the index and world spaces.
+            voxel_size: Voxel size(s) of the new volume. Ignored if ``transform`` is given.
+            translation: Translation between the index and world spaces.
+            transform: Linear transform between the index and world spaces.
               If ``None``, deduced from ``voxel_size``.
             device: The CUDA device to create the volume on, e.g. ``"cuda"`` or ``"cuda:0"``.
 
@@ -5898,7 +6804,7 @@ class MeshQueryRay:
         normal (vec3f): Face normal.
 
     See Also:
-        :func:`mesh_query_ray`.
+        :func:`mesh_query_ray() <warp._src.lang.mesh_query_ray>`.
     """
 
     from warp._src.codegen import Var as _Var  # noqa: PLC0415
@@ -5917,34 +6823,69 @@ class MeshQueryRay:
 
 
 class HashGrid:
-    """Hash-based spatial grid for accelerated neighbor queries on point data."""
+    """Hash-based spatial grid for accelerated neighbor queries on point data.
+
+    Supports float16, float32, and float64 precision via the ``dtype`` parameter.
+    """
+
+    # Native type IDs (must match HashGridTypeId enum in hashgrid.cpp)
+    _TYPE_FLOAT16 = 0
+    _TYPE_FLOAT32 = 1
+    _TYPE_FLOAT64 = 2
+
+    _dtype_map: ClassVar = {
+        float16: (vec3h, _TYPE_FLOAT16),
+        float32: (vec3f, _TYPE_FLOAT32),
+        float64: (vec3d, _TYPE_FLOAT64),
+    }
+
+    def _native_func(self, action):
+        """Get the appropriate native function for the given action."""
+        location = "host" if self.device.is_cpu else "device"
+        return getattr(self.runtime.core, f"wp_hash_grid_{action}_{location}")
 
     def __new__(cls, *args, **kwargs):
         instance = super().__new__(cls)
         instance.id = None
         return instance
 
-    def __init__(self, dim_x, dim_y, dim_z, device=None):
+    def __init__(self, dim_x, dim_y, dim_z, device=None, dtype=None):
         """Class representing a hash grid object for accelerated point queries.
 
         Attributes:
-            id: Unique identifier for this mesh object, can be passed to kernels.
+            id: Unique identifier for this hash grid object, can be passed to kernels.
             device: Device this object lives on, all buffers must live on the same device.
+            dtype: Scalar data type (float16, float32, or float64).
+
+        Note:
+            ``float16`` grids have limited precision (~3.3 decimal digits, max ~65504).
+            Large coordinates or small cell widths may cause incorrect cell assignments.
 
         Args:
             dim_x (int): Number of cells in x-axis
             dim_y (int): Number of cells in y-axis
             dim_z (int): Number of cells in z-axis
+            device: Device to create the hash grid on
+            dtype: Scalar data type for point coordinates (default: float32)
         """
+        # Default to float32 for backward compatibility
+        if dtype is None:
+            dtype = float32
+
+        dtype_map = self._dtype_map
+        if dtype not in dtype_map:
+            raise TypeError(f"Unsupported dtype {dtype} for HashGrid. Supported types: float16, float32, float64")
+
+        self.dtype = dtype
+        self._vec_type, self._type_id = dtype_map[dtype]
 
         self.runtime = warp._src.context.runtime
-
         self.device = self.runtime.get_device(device)
 
         if self.device.is_cpu:
-            self.id = self.runtime.core.wp_hash_grid_create_host(dim_x, dim_y, dim_z)
+            self.id = self._native_func("create")(self._type_id, dim_x, dim_y, dim_z)
         else:
-            self.id = self.runtime.core.wp_hash_grid_create_device(self.device.context, dim_x, dim_y, dim_z)
+            self.id = self._native_func("create")(self.device.context, self._type_id, dim_x, dim_y, dim_z)
 
         # indicates whether the grid data has been reserved for use by a kernel
         self.reserved = False
@@ -5956,29 +6897,26 @@ class HashGrid:
         of points changes.
 
         Args:
-            points (:class:`warp.array`): Array of points of type :class:`warp.vec3`
+            points (:class:`warp.array`): Array of points matching the grid's dtype
+                (vec3h for float16, vec3/vec3f for float32, vec3d for float64)
             radius (float): The cell size to use for bucketing points, cells are cubes with edges of this width.
                             For best performance the radius used to construct the grid should match closely to
                             the radius used when performing queries.
         """
+        if not types_equal(points.dtype, self._vec_type):
+            raise TypeError(f"Hash grid points should have type {self._vec_type.__name__}, got {points.dtype}")
 
-        if not types_equal(points.dtype, warp.vec3):
-            raise TypeError("Hash grid points should have type warp.vec3")
+        if radius <= 0.0:
+            raise ValueError(f"Hash grid cell width must be positive, got {radius}")
 
         if points.ndim > 1:
             points = points.contiguous().flatten()
 
-        if self.device.is_cpu:
-            self.runtime.core.wp_hash_grid_update_host(self.id, radius, ctypes.byref(points.__ctype__()))
-        else:
-            self.runtime.core.wp_hash_grid_update_device(self.id, radius, ctypes.byref(points.__ctype__()))
+        self._native_func("update")(self.id, self._type_id, radius, ctypes.byref(points.__ctype__()))
         self.reserved = True
 
     def reserve(self, num_points):
-        if self.device.is_cpu:
-            self.runtime.core.wp_hash_grid_reserve_host(self.id, num_points)
-        else:
-            self.runtime.core.wp_hash_grid_reserve_device(self.id, num_points)
+        self._native_func("reserve")(self.id, self._type_id, num_points)
         self.reserved = True
 
     def __del__(self):
@@ -5987,11 +6925,11 @@ class HashGrid:
 
         try:
             if self.device.is_cpu:
-                self.runtime.core.wp_hash_grid_destroy_host(self.id)
+                self._native_func("destroy")(self.id, self._type_id)
             else:
                 # use CUDA context guard to avoid side effects during garbage collection
                 with self.device.context_guard:
-                    self.runtime.core.wp_hash_grid_destroy_device(self.id)
+                    self._native_func("destroy")(self.id, self._type_id)
         except (TypeError, AttributeError):
             # Suppress TypeError and AttributeError when callables become None during shutdown
             pass
@@ -6033,7 +6971,7 @@ def type_generic_equal(a, b):
     if getattr(a, "_wp_generic_type_hint_", "a") is not getattr(b, "_wp_generic_type_hint_", "b"):
         return False
 
-    for p1, p2 in zip(a._wp_type_params_, b._wp_type_params_):
+    for p1, p2 in zip(a._wp_type_params_, b._wp_type_params_, strict=True):
         if not scalars_equal(p1, p2):
             return False
 
@@ -6061,7 +6999,7 @@ def type_matches_template(arg_type, template_type):
         if is_array(arg_type) and is_array(template_type):
             # Check array type compatibility: allow subtypes to match parent types
             # (e.g., fixedarray can match array parameter)
-            if issubclass(type(arg_type), type(template_type)):
+            if issubclass(concrete_array_type(arg_type), concrete_array_type(template_type)):
                 return (
                     type_matches_template(arg_type.dtype, template_type.dtype) and arg_type.ndim == template_type.ndim
                 )
@@ -6076,7 +7014,7 @@ def type_matches_template(arg_type, template_type):
             return False
         # Check array type compatibility: allow subtypes to match parent types
         # (e.g., fixedarray can match array parameter)
-        if not issubclass(type(arg_type), type(template_type)):
+        if not issubclass(concrete_array_type(arg_type), concrete_array_type(template_type)):
             return False
         if not type_matches_template(arg_type.dtype, template_type.dtype):
             return False
@@ -6168,22 +7106,26 @@ simple_type_codes = {
     uint16: "u2",
     uint32: "u4",
     uint64: "u8",
+    handle: "u8",
     float16: "f2",
+    bfloat16: "bf2",
     float32: "f4",
     float64: "f8",
     shape_t: "sh",
     range_t: "rg",
     launch_bounds_t: "lb",
     HashGridQuery: "hgq",
+    HashGridQueryH: "hgqh",
+    HashGridQueryD: "hgqd",
     MeshQueryAABB: "mqa",
     MeshQueryPoint: "mqp",
     MeshQueryRay: "mqr",
     BvhQuery: "bvhq",
-    # Texture2D and Texture3D are added at the end of the file to avoid circular imports
+    # Textures are added at the end of the file to avoid circular imports
 }
 
 
-def get_type_code(arg_type: type) -> str:
+def get_type_code(arg_type) -> str:
     if arg_type is Any:
         # special case for generics
         # note: since Python 3.11 Any is a type, so we check for it first
@@ -6231,14 +7173,18 @@ def get_type_code(arg_type: type) -> str:
                 return type_code
             else:
                 raise TypeError(f"Unrecognized type '{arg_type}'")
-    elif isinstance(arg_type, array):
-        return f"a{arg_type.ndim}{get_type_code(arg_type.dtype)}"
-    elif isinstance(arg_type, indexedarray):
-        return f"ia{arg_type.ndim}{get_type_code(arg_type.dtype)}"
-    elif isinstance(arg_type, fabricarray):
-        return f"fa{arg_type.ndim}{get_type_code(arg_type.dtype)}"
-    elif isinstance(arg_type, indexedfabricarray):
-        return f"ifa{arg_type.ndim}{get_type_code(arg_type.dtype)}"
+    elif is_array(arg_type):
+        ndim_code = "?" if arg_type.ndim is Any else str(arg_type.ndim)
+        dtype_code = "?" if arg_type.dtype is Any else get_type_code(arg_type.dtype)
+        # fixedarray is a subclass of array; map it to "a" like its parent
+        prefix = {
+            array: "a",
+            fixedarray: "a",
+            indexedarray: "ia",
+            fabricarray: "fa",
+            indexedfabricarray: "ifa",
+        }[concrete_array_type(arg_type)]
+        return f"{prefix}{ndim_code}{dtype_code}"
     elif get_origin(arg_type) is tuple:
         arg_types = get_args(arg_type)
         return f"tpl{len(arg_types)}{''.join(get_type_code(x) for x in arg_types)}"
@@ -6247,9 +7193,13 @@ def get_type_code(arg_type: type) -> str:
     elif isinstance(arg_type, warp._src.codegen.Struct):
         return arg_type.native_name
     elif isinstance(arg_type, tile):
-        shape_string = "".join(str(num) for num in arg_type.shape)
+        shape_string = "?" if arg_type.shape is Any else "".join(str(num) for num in arg_type.shape)
         storage = "s" if arg_type.storage == "shared" else "r"
-        return f"t{storage}{shape_string}{get_type_code(arg_type.dtype)}"
+        dtype_code = "?" if arg_type.dtype is Any else get_type_code(arg_type.dtype)
+        return f"t{storage}{shape_string}{dtype_code}"
+    elif isinstance(arg_type, tile_stack):
+        dtype_code = get_type_code(arg_type.dtype)
+        return f"ts{arg_type.capacity}{dtype_code}"
     elif arg_type == Scalar:
         # generic scalar type
         return "s?"
@@ -6292,13 +7242,11 @@ def is_generic_signature(sig):
 
 
 # Import texture classes from texture module at the end to avoid circular imports
-# These are re-exported from types.py for backward compatibility
-from warp._src.texture import Texture as Texture  # noqa: E402
+from warp._src.texture import Texture1D as Texture1D  # noqa: E402
 from warp._src.texture import Texture2D as Texture2D  # noqa: E402
 from warp._src.texture import Texture3D as Texture3D  # noqa: E402
-from warp._src.texture import texture2d_t as texture2d_t  # noqa: E402
-from warp._src.texture import texture3d_t as texture3d_t  # noqa: E402
 
 # Add texture types to simple_type_codes now that they're imported
+simple_type_codes[Texture1D] = "t1"
 simple_type_codes[Texture2D] = "t2"
 simple_type_codes[Texture3D] = "t3"

@@ -1,19 +1,7 @@
-/*
- * SPDX-FileCopyrightText: Copyright (c) 2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
- * SPDX-License-Identifier: Apache-2.0
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- * http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// SPDX-FileCopyrightText: Copyright (c) 2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+#define CUBQL_GPU_BUILDER_IMPLEMENTATION 1
 
 #include "warp.h"
 
@@ -37,6 +25,19 @@ namespace cub = hipcub;
 
 #define THRUST_IGNORE_CUB_VERSION_CHECK
 #define REORDER_HOST_TREE
+
+#if !defined(__HIP_PLATFORM_AMD__)
+// CUB must be included before cuBQL. cuBQL's math/common.h includes <stdexcept>,
+// which causes CCCL's _CCCL_HAS_EXCEPTIONS() to be true when typeid.h is later
+// pulled in by CUB. This makes __throw_out_of_range non-constexpr, breaking a
+// static_assert in typeid.h on GCC < 12 (which lacks P2448R2 relaxed constexpr).
+#include <cub/cub.cuh>
+
+#ifndef WP_DISABLE_CUBQL
+#include "cuBQL/bvh.h"
+#endif
+#endif  // !__HIP_PLATFORM_AMD__
+
 
 extern CUcontext get_current_context();
 
@@ -764,7 +765,34 @@ __global__ void compute_total_inv_edges(const vec3* total_lower, const vec3* tot
 }
 
 
-// Constructor / destructor removed – all scratch is pool-allocated in build().
+// On HIP, constructor / destructor are intentionally empty -- all scratch
+// (including total_lower/upper/inv_edges) is pool-allocated in build().
+#if !defined(__HIP_PLATFORM_AMD__)
+LinearBVHBuilderGPU::LinearBVHBuilderGPU()
+    : indices(NULL)
+    , keys(NULL)
+    , deltas(NULL)
+    , range_lefts(NULL)
+    , range_rights(NULL)
+    , num_children(NULL)
+    , total_lower(NULL)
+    , total_upper(NULL)
+    , total_inv_edges(NULL)
+{
+    total_lower = (vec3*)wp_alloc_device(WP_CURRENT_CONTEXT, sizeof(vec3), "(native:bvh)");
+    total_upper = (vec3*)wp_alloc_device(WP_CURRENT_CONTEXT, sizeof(vec3), "(native:bvh)");
+    total_inv_edges = (vec3*)wp_alloc_device(WP_CURRENT_CONTEXT, sizeof(vec3), "(native:bvh)");
+}
+
+LinearBVHBuilderGPU::~LinearBVHBuilderGPU()
+{
+    wp_free_device(WP_CURRENT_CONTEXT, total_lower);
+    wp_free_device(WP_CURRENT_CONTEXT, total_upper);
+    wp_free_device(WP_CURRENT_CONTEXT, total_inv_edges);
+}
+#endif  // !__HIP_PLATFORM_AMD__
+
+
 #if defined(__HIP_PLATFORM_AMD__)
 void LinearBVHBuilderGPU::build(
     BVH& bvh, const vec3* item_lowers, const vec3* item_uppers, int num_items, bounds3* total_bounds, int* item_groups
@@ -914,15 +942,15 @@ void LinearBVHBuilderGPU::build(
         int* item_groups
     )
     {
-        // allocate temporary memory used during  building
-        indices = (int*)wp_alloc_device(WP_CURRENT_CONTEXT, sizeof(int) * num_items * 2);  // *2 for radix sort
-        keys = (uint64_t*)wp_alloc_device(WP_CURRENT_CONTEXT, sizeof(uint64_t) * num_items * 2);  // *2 for radix sort
+        // allocate temporary memory used during building
+        indices = (int*)wp_alloc_device(WP_CURRENT_CONTEXT, sizeof(int) * num_items * 2, "(native:bvh)");  // *2 for radix sort
+        keys = (uint64_t*)wp_alloc_device(WP_CURRENT_CONTEXT, sizeof(uint64_t) * num_items * 2, "(native:bvh)");  // *2 for radix sort
         deltas = (int*)wp_alloc_device(
-            WP_CURRENT_CONTEXT, sizeof(int) * num_items
+            WP_CURRENT_CONTEXT, sizeof(int) * num_items, "(native:bvh)"
         );  // highest differentiating bit between keys for item i and i+1
-        range_lefts = (int*)wp_alloc_device(WP_CURRENT_CONTEXT, sizeof(int) * bvh.max_nodes);
-        range_rights = (int*)wp_alloc_device(WP_CURRENT_CONTEXT, sizeof(int) * bvh.max_nodes);
-        num_children = (int*)wp_alloc_device(WP_CURRENT_CONTEXT, sizeof(int) * bvh.max_nodes);
+        range_lefts = (int*)wp_alloc_device(WP_CURRENT_CONTEXT, sizeof(int) * bvh.max_nodes, "(native:bvh)");
+        range_rights = (int*)wp_alloc_device(WP_CURRENT_CONTEXT, sizeof(int) * bvh.max_nodes, "(native:bvh)");
+        num_children = (int*)wp_alloc_device(WP_CURRENT_CONTEXT, sizeof(int) * bvh.max_nodes, "(native:bvh)");
 
         // if total bounds supplied by the host then we just
         // compute our edge length and upload it to the GPU directly
@@ -1015,7 +1043,7 @@ void LinearBVHBuilderGPU::build(
 // buffer_size is the number of T, not the number of bytes
 template <typename T> T* make_device_buffer_of(void* context, T* host_buffer, size_t buffer_size)
 {
-    T* device_buffer = (T*)wp_alloc_device(context, sizeof(T) * buffer_size);
+    T* device_buffer = (T*)wp_alloc_device(context, sizeof(T) * buffer_size, "(native:bvh)");
     ;
     wp_memcpy_h2d(context, device_buffer, host_buffer, sizeof(T) * buffer_size);
 
@@ -1037,7 +1065,7 @@ void copy_host_tree_to_device(void* context, BVH& bvh_host, BVH& bvh_device_on_h
     bvh_device_on_host.max_depth = bvh_host.max_depth;
     bvh_device_on_host.leaf_size = bvh_host.leaf_size;
 
-    bvh_device_on_host.root = (int*)wp_alloc_device(context, sizeof(int));
+    bvh_device_on_host.root = (int*)wp_alloc_device(context, sizeof(int), "(native:bvh)");
     wp_memcpy_h2d(context, bvh_device_on_host.root, bvh_host.root, sizeof(int));
     bvh_device_on_host.context = context;
 
@@ -1092,7 +1120,7 @@ void bvh_create_device(
         bvh_device_on_host.item_groups = groups;
         // node_counts is not allocated for host tree
         bvh_device_on_host.node_counts
-            = (int*)wp_alloc_device(WP_CURRENT_CONTEXT, sizeof(int) * bvh_device_on_host.max_nodes);
+            = (int*)wp_alloc_device(WP_CURRENT_CONTEXT, sizeof(int) * bvh_device_on_host.max_nodes, "(native:bvh)");
         wp::bvh_destroy_host(bvh_host);
     } else if (constructor_type == BVH_CONSTRUCTOR_LBVH) {
         bvh_device_on_host.leaf_size = leaf_size;
@@ -1100,25 +1128,26 @@ void bvh_create_device(
         bvh_device_on_host.max_nodes = 2 * num_items - 1;
         bvh_device_on_host.num_leaf_nodes = num_items;
         bvh_device_on_host.node_lowers = (BVHPackedNodeHalf*)wp_alloc_device(
-            WP_CURRENT_CONTEXT, sizeof(BVHPackedNodeHalf) * bvh_device_on_host.max_nodes
+            WP_CURRENT_CONTEXT, sizeof(BVHPackedNodeHalf) * bvh_device_on_host.max_nodes, "(native:bvh)"
         );
         wp_memset_device(
             WP_CURRENT_CONTEXT, bvh_device_on_host.node_lowers, 0,
             sizeof(BVHPackedNodeHalf) * bvh_device_on_host.max_nodes
         );
         bvh_device_on_host.node_uppers = (BVHPackedNodeHalf*)wp_alloc_device(
-            WP_CURRENT_CONTEXT, sizeof(BVHPackedNodeHalf) * bvh_device_on_host.max_nodes
+            WP_CURRENT_CONTEXT, sizeof(BVHPackedNodeHalf) * bvh_device_on_host.max_nodes, "(native:bvh)"
         );
         wp_memset_device(
             WP_CURRENT_CONTEXT, bvh_device_on_host.node_uppers, 0,
             sizeof(BVHPackedNodeHalf) * bvh_device_on_host.max_nodes
         );
         bvh_device_on_host.node_parents
-            = (int*)wp_alloc_device(WP_CURRENT_CONTEXT, sizeof(int) * bvh_device_on_host.max_nodes);
+            = (int*)wp_alloc_device(WP_CURRENT_CONTEXT, sizeof(int) * bvh_device_on_host.max_nodes, "(native:bvh)");
         bvh_device_on_host.node_counts
-            = (int*)wp_alloc_device(WP_CURRENT_CONTEXT, sizeof(int) * bvh_device_on_host.max_nodes);
-        bvh_device_on_host.root = (int*)wp_alloc_device(WP_CURRENT_CONTEXT, sizeof(int));
-        bvh_device_on_host.primitive_indices = (int*)wp_alloc_device(WP_CURRENT_CONTEXT, sizeof(int) * num_items);
+            = (int*)wp_alloc_device(WP_CURRENT_CONTEXT, sizeof(int) * bvh_device_on_host.max_nodes, "(native:bvh)");
+        bvh_device_on_host.root = (int*)wp_alloc_device(WP_CURRENT_CONTEXT, sizeof(int), "(native:bvh)");
+        bvh_device_on_host.primitive_indices
+            = (int*)wp_alloc_device(WP_CURRENT_CONTEXT, sizeof(int) * num_items, "(native:bvh)");
         bvh_device_on_host.item_lowers = lowers;
         bvh_device_on_host.item_uppers = uppers;
         bvh_device_on_host.item_groups = groups;
@@ -1173,6 +1202,172 @@ void bvh_rebuild_device(BVH& bvh)
     builder.build(bvh, bvh.item_lowers, bvh.item_uppers, bvh.num_items, NULL, bvh.item_groups);
 }
 
+#ifndef WP_DISABLE_CUBQL
+
+__global__ void cubql_make_boxes(const vec3* lowers, const vec3* uppers, cuBQL::box3f* boxes, int n)
+{
+    const int tid = blockDim.x * blockIdx.x + threadIdx.x;
+    if (tid < n) {
+        const vec3 lower = lowers[tid];
+        const vec3 upper = uppers[tid];
+        boxes[tid]
+            = cuBQL::box3f(cuBQL::vec3f(lower[0], lower[1], lower[2]), cuBQL::vec3f(upper[0], upper[1], upper[2]));
+    }
+}
+
+static inline cuBQL::bvh3f cubql_native_view(const CuBQLBVH& bvh)
+{
+    cuBQL::bvh3f native;
+    native.nodes = reinterpret_cast<cuBQL::bvh3f::node_t*>(bvh.nodes);
+    native.numNodes = uint32_t(bvh.num_nodes);
+    native.primIDs = reinterpret_cast<uint32_t*>(bvh.primitive_indices);
+    native.numPrims = uint32_t(bvh.num_prims);
+    return native;
+}
+
+static inline void cubql_assign(CuBQLBVH& bvh, const cuBQL::bvh3f& native)
+{
+    bvh.nodes = reinterpret_cast<CuBQLNode*>(native.nodes);
+    bvh.num_nodes = int(native.numNodes);
+    bvh.primitive_indices = native.primIDs;
+    bvh.num_prims = int(native.numPrims);
+    if (bvh.root) {
+        int root_index = native.numNodes > 0 ? 0 : -1;
+        wp_memcpy_h2d(WP_CURRENT_CONTEXT, bvh.root, &root_index, sizeof(int));
+    }
+}
+
+static inline void cubql_update_device_boxes(CuBQLBVH& bvh)
+{
+    if (!bvh.boxes || bvh.num_items <= 0) {
+        return;
+    }
+    wp_launch_device(
+        WP_CURRENT_CONTEXT, cubql_make_boxes, bvh.num_items,
+        (bvh.item_lowers, bvh.item_uppers, reinterpret_cast<cuBQL::box3f*>(bvh.boxes), bvh.num_items)
+    );
+}
+
+void cubql_bvh_create_device(
+    void* context, vec3* lowers, vec3* uppers, int num_items, int leaf_size, CuBQLBVH& bvh_device_on_host
+)
+{
+    ContextGuard guard(context);
+    memset(&bvh_device_on_host, 0, sizeof(CuBQLBVH));
+
+    bvh_device_on_host.context = context ? context : wp_cuda_context_get_current();
+    bvh_device_on_host.item_lowers = lowers;
+    bvh_device_on_host.item_uppers = uppers;
+    bvh_device_on_host.num_items = num_items;
+    bvh_device_on_host.leaf_size = leaf_size;
+    bvh_device_on_host.root = (int*)wp_alloc_device(WP_CURRENT_CONTEXT, sizeof(int));
+
+    int root_index = -1;
+    wp_memcpy_h2d(WP_CURRENT_CONTEXT, bvh_device_on_host.root, &root_index, sizeof(int));
+
+    if (num_items <= 0) {
+        return;
+    }
+
+    bvh_device_on_host.boxes = wp_alloc_device(WP_CURRENT_CONTEXT, sizeof(cuBQL::box3f) * num_items);
+    cubql_update_device_boxes(bvh_device_on_host);
+
+    cuBQL::bvh3f native;
+    cuBQL::BuildConfig build_config;
+    build_config.enableSAH();
+    build_config.makeLeafThreshold = leaf_size;
+    cuBQL::gpuBuilder(
+        native, reinterpret_cast<cuBQL::box3f*>(bvh_device_on_host.boxes), uint32_t(num_items), build_config
+    );
+    cubql_assign(bvh_device_on_host, native);
+}
+
+void cubql_bvh_destroy_device(CuBQLBVH& bvh)
+{
+    ContextGuard guard(bvh.context);
+
+    if (bvh.nodes || bvh.primitive_indices) {
+        cuBQL::bvh3f native = cubql_native_view(bvh);
+        cuBQL::cuda::free(native);
+    }
+
+    if (bvh.boxes) {
+        wp_free_device(WP_CURRENT_CONTEXT, bvh.boxes);
+        bvh.boxes = nullptr;
+    }
+    if (bvh.root) {
+        wp_free_device(WP_CURRENT_CONTEXT, bvh.root);
+        bvh.root = nullptr;
+    }
+    bvh.nodes = nullptr;
+    bvh.num_nodes = 0;
+    bvh.primitive_indices = nullptr;
+    bvh.num_prims = 0;
+    bvh.leaf_size = 0;
+}
+
+void cubql_bvh_refit_device(CuBQLBVH& bvh)
+{
+    ContextGuard guard(bvh.context);
+    if (!bvh.nodes || !bvh.boxes || bvh.num_items <= 0) {
+        return;
+    }
+
+    cubql_update_device_boxes(bvh);
+    cuBQL::bvh3f native = cubql_native_view(bvh);
+    cuBQL::cuda::refit(native, reinterpret_cast<cuBQL::box3f*>(bvh.boxes));
+}
+
+void cubql_bvh_rebuild_device(CuBQLBVH& bvh)
+{
+    ContextGuard guard(bvh.context);
+
+    if (bvh.nodes || bvh.primitive_indices) {
+        cuBQL::bvh3f old_native = cubql_native_view(bvh);
+        cuBQL::cuda::free(old_native);
+    }
+
+    if (bvh.num_items <= 0) {
+        bvh.nodes = nullptr;
+        bvh.primitive_indices = nullptr;
+        bvh.num_nodes = 0;
+        bvh.num_prims = 0;
+        if (bvh.root) {
+            int root_index = -1;
+            wp_memcpy_h2d(WP_CURRENT_CONTEXT, bvh.root, &root_index, sizeof(int));
+        }
+        return;
+    }
+
+    if (!bvh.boxes) {
+        bvh.boxes = wp_alloc_device(WP_CURRENT_CONTEXT, sizeof(cuBQL::box3f) * bvh.num_items);
+    }
+    cubql_update_device_boxes(bvh);
+
+    cuBQL::bvh3f native;
+    cuBQL::BuildConfig build_config;
+    build_config.enableSAH();
+    build_config.makeLeafThreshold = bvh.leaf_size;
+    cuBQL::gpuBuilder(native, reinterpret_cast<cuBQL::box3f*>(bvh.boxes), uint32_t(bvh.num_items), build_config);
+    cubql_assign(bvh, native);
+}
+
+#else  // WP_DISABLE_CUBQL
+
+void cubql_bvh_create_device(
+    void* context, vec3* lowers, vec3* uppers, int num_items, int leaf_size, CuBQLBVH& bvh_device_on_host
+)
+{
+    fprintf(stderr, "Warp error: cuBQL support disabled (WP_DISABLE_CUBQL)\n");
+    memset(&bvh_device_on_host, 0, sizeof(CuBQLBVH));
+}
+
+void cubql_bvh_destroy_device(CuBQLBVH&) { }
+void cubql_bvh_refit_device(CuBQLBVH&) { }
+void cubql_bvh_rebuild_device(CuBQLBVH&) { }
+
+#endif  // WP_DISABLE_CUBQL
+
 
 }  // namespace wp
 
@@ -1217,11 +1412,31 @@ uint64_t wp_bvh_create_device(
     );
 
     // create device-side BVH descriptor
-    bvh_device_ptr = (wp::BVH*)wp_alloc_device(WP_CURRENT_CONTEXT, sizeof(wp::BVH));
+    bvh_device_ptr = (wp::BVH*)wp_alloc_device(WP_CURRENT_CONTEXT, sizeof(wp::BVH), "(native:bvh)");
     wp_memcpy_h2d(WP_CURRENT_CONTEXT, bvh_device_ptr, &bvh_device_on_host, sizeof(wp::BVH));
 
     uint64_t bvh_id = (uint64_t)bvh_device_ptr;
     wp::bvh_add_descriptor(bvh_id, bvh_device_on_host);
+    return bvh_id;
+}
+
+uint64_t wp_cubql_bvh_create_device(void* context, wp::vec3* lowers, wp::vec3* uppers, int num_items, int leaf_size)
+{
+    ContextGuard guard(context);
+    wp::CuBQLBVH bvh_device_on_host;
+    memset(&bvh_device_on_host, 0, sizeof(wp::CuBQLBVH));
+
+    wp::cubql_bvh_create_device(WP_CURRENT_CONTEXT, lowers, uppers, num_items, leaf_size, bvh_device_on_host);
+
+    if (!bvh_device_on_host.nodes && num_items > 0) {
+        return 0;
+    }
+
+    wp::CuBQLBVH* bvh_device_ptr = (wp::CuBQLBVH*)wp_alloc_device(WP_CURRENT_CONTEXT, sizeof(wp::CuBQLBVH));
+    wp_memcpy_h2d(WP_CURRENT_CONTEXT, bvh_device_ptr, &bvh_device_on_host, sizeof(wp::CuBQLBVH));
+
+    uint64_t bvh_id = (uint64_t)bvh_device_ptr;
+    wp::cubql_bvh_add_descriptor(bvh_id, bvh_device_on_host);
     return bvh_id;
 }
 
@@ -1234,6 +1449,38 @@ void wp_bvh_destroy_device(uint64_t id)
         wp::bvh_rem_descriptor(id);
 
         // free descriptor
+        wp_free_device(WP_CURRENT_CONTEXT, (void*)id);
+    }
+}
+
+void wp_cubql_bvh_refit_device(uint64_t id)
+{
+    wp::CuBQLBVH bvh;
+    if (wp::cubql_bvh_get_descriptor(id, bvh)) {
+        ContextGuard guard(bvh.context);
+        wp::cubql_bvh_refit_device(bvh);
+        wp::cubql_bvh_add_descriptor(id, bvh);
+        wp_memcpy_h2d(WP_CURRENT_CONTEXT, (void*)id, &bvh, sizeof(wp::CuBQLBVH));
+    }
+}
+
+void wp_cubql_bvh_rebuild_device(uint64_t id)
+{
+    wp::CuBQLBVH bvh;
+    if (wp::cubql_bvh_get_descriptor(id, bvh)) {
+        ContextGuard guard(bvh.context);
+        wp::cubql_bvh_rebuild_device(bvh);
+        wp::cubql_bvh_add_descriptor(id, bvh);
+        wp_memcpy_h2d(WP_CURRENT_CONTEXT, (void*)id, &bvh, sizeof(wp::CuBQLBVH));
+    }
+}
+
+void wp_cubql_bvh_destroy_device(uint64_t id)
+{
+    wp::CuBQLBVH bvh;
+    if (wp::cubql_bvh_get_descriptor(id, bvh)) {
+        wp::cubql_bvh_destroy_device(bvh);
+        wp::cubql_bvh_rem_descriptor(id);
         wp_free_device(WP_CURRENT_CONTEXT, (void*)id);
     }
 }

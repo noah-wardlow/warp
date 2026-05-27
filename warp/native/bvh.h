@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2022 NVIDIA CORPORATION & AFFILIATES
+// SPDX-FileCopyrightText: Copyright (c) 2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -17,6 +17,8 @@
 #define SAH_NUM_BUCKETS (16)
 #define USE_LOAD4
 #define BVH_QUERY_STACK_SIZE (32)
+#define CUBQL_BVH_QUERY_STACK_SIZE (64)
+#define CUBQL_MESH_CONSTRUCTOR_TYPE (-1)
 
 #define BVH_CONSTRUCTOR_SAH (0)
 #define BVH_CONSTRUCTOR_MEDIAN (1)
@@ -178,6 +180,40 @@ struct BVH {
     void* context;
 };
 
+// Node layout compatible with cuBQL::BinaryBVH<float, 3>::Node.
+// lower/upper store bounds, admin packs:
+//  - lower 48 bits: offset (children for inner nodes, prim range start for leaves).
+//    Inner-node children are stored as a pair at offset+0 and offset+1.
+//  - upper 16 bits: count (0 for inner, >0 for leaves)
+struct CuBQLNode {
+    vec3 lower;
+    vec3 upper;
+    uint64_t admin;
+};
+
+struct CuBQLBVH {
+    CuBQLNode* nodes;
+    int num_nodes;
+
+    uint32_t* primitive_indices;
+    int num_prims;
+
+    // pointer (CPU/GPU) to root node index in nodes[] (0 for non-empty trees)
+    int* root;
+
+    // item bounds are not owned by the BVH but by the caller
+    vec3* item_lowers;
+    vec3* item_uppers;
+    int num_items;
+    int leaf_size;
+
+    // contiguous boxes used by cuBQL builders/refit (host or device allocation)
+    void* boxes;
+
+    // cuda context
+    void* context;
+};
+
 CUDA_CALLABLE inline BVHPackedNodeHalf make_node(const vec3& bound, int child, bool leaf)
 {
     BVHPackedNodeHalf n;
@@ -249,10 +285,17 @@ template <int dim> CUDA_CALLABLE inline uint32_t morton3(float x, float y, float
 // making the class accessible from python
 
 CUDA_CALLABLE inline BVH bvh_get(uint64_t id) { return *(BVH*)(id); }
+CUDA_CALLABLE inline CuBQLBVH cubql_bvh_get(uint64_t id) { return *(CuBQLBVH*)(id); }
 
 CUDA_CALLABLE inline int bvh_get_num_bounds(uint64_t id)
 {
     BVH bvh = bvh_get(id);
+    return bvh.num_items;
+}
+
+CUDA_CALLABLE inline int cubql_bvh_get_num_bounds(uint64_t id)
+{
+    CuBQLBVH bvh = cubql_bvh_get(id);
     return bvh.num_items;
 }
 
@@ -350,6 +393,7 @@ struct bvh_query_t {
         , input_upper()
         , bounds_nr(0)
         , primitive_counter(-1)
+        , last_query_valid(true)
     {
     }
 
@@ -376,6 +420,10 @@ struct bvh_query_t {
 
     int bounds_nr;
     bool is_ray;
+    // Tracks whether the most recent bvh_query_next() / tile_bvh_query_next() call
+    // produced a valid index. Seeded to true on construction so an initial
+    // tile_query_valid() check (before any next() call) reports valid.
+    bool last_query_valid;
 };
 
 CUDA_CALLABLE inline bool
@@ -512,7 +560,6 @@ CUDA_CALLABLE inline bool bvh_query_next(bvh_query_t& query, int& index, const f
     return false;
 }
 
-
 CUDA_CALLABLE inline int iter_next(bvh_query_t& query) { return query.bounds_nr; }
 
 CUDA_CALLABLE inline bool iter_cmp(bvh_query_t& query)
@@ -540,6 +587,9 @@ adj_bvh_query_next(bvh_query_t& query, int& index, const float& max_dist, bvh_qu
 CUDA_CALLABLE bool bvh_get_descriptor(uint64_t id, BVH& bvh);
 CUDA_CALLABLE void bvh_add_descriptor(uint64_t id, const BVH& bvh);
 CUDA_CALLABLE void bvh_rem_descriptor(uint64_t id);
+CUDA_CALLABLE bool cubql_bvh_get_descriptor(uint64_t id, CuBQLBVH& bvh);
+CUDA_CALLABLE void cubql_bvh_add_descriptor(uint64_t id, const CuBQLBVH& bvh);
+CUDA_CALLABLE void cubql_bvh_rem_descriptor(uint64_t id);
 
 
 void bvh_create_host(
@@ -547,6 +597,10 @@ void bvh_create_host(
 );
 void bvh_destroy_host(wp::BVH& bvh);
 void bvh_refit_host(wp::BVH& bvh);
+void cubql_bvh_create_host(vec3* lowers, vec3* uppers, int num_items, int leaf_size, CuBQLBVH& bvh);
+void cubql_bvh_destroy_host(CuBQLBVH& bvh);
+void cubql_bvh_refit_host(CuBQLBVH& bvh);
+void cubql_bvh_rebuild_host(CuBQLBVH& bvh);
 // reorder a top-down-constructed bvh so its structure accords with a bottom-up tree:
 // all of its leaves nodes are stored as the first bvh.num_leaf_nodes nodes
 void reorder_top_down_bvh(BVH& bvh_host);
@@ -565,6 +619,12 @@ void bvh_create_device(
 );
 void bvh_destroy_device(BVH& bvh);
 void bvh_refit_device(BVH& bvh);
+void cubql_bvh_create_device(
+    void* context, vec3* lowers, vec3* uppers, int num_items, int leaf_size, CuBQLBVH& bvh_device_on_host
+);
+void cubql_bvh_destroy_device(CuBQLBVH& bvh);
+void cubql_bvh_refit_device(CuBQLBVH& bvh);
+void cubql_bvh_rebuild_device(CuBQLBVH& bvh);
 
 #endif  // WP_ENABLE_CUDA
 

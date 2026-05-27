@@ -1,22 +1,10 @@
-/*
- * SPDX-FileCopyrightText: Copyright (c) 2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
- * SPDX-License-Identifier: Apache-2.0
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- * http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// SPDX-FileCopyrightText: Copyright (c) 2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
 
 #include "warp.h"
 
+#include "alloc_tracker.h"
+#include "apic.h"
 #include "cuda_util.h"
 #include "error.h"
 #include "scan.h"
@@ -779,24 +767,30 @@ static inline const char* get_cuda_kernel_name(void* kernel)
 }
 
 
-void* wp_alloc_pinned(size_t s)
+void* wp_alloc_pinned(size_t s, const char* tag)
 {
     void* ptr = NULL;
     check_cuda(cudaMallocHost(&ptr, s));
+    if (g_alloc_tracker.enabled && ptr)
+        g_alloc_tracker.record_alloc(ptr, s, ALLOC_KIND_PINNED, -1, tag);
     return ptr;
 }
 
-void wp_free_pinned(void* ptr) { ignore_cuda_error(cudaFreeHost(ptr)); }
+void wp_free_pinned(void* ptr)
+{
+    if (g_alloc_tracker.enabled && ptr)
+        g_alloc_tracker.record_free(ptr);
+    ignore_cuda_error(cudaFreeHost(ptr));
+}
 
-void* wp_alloc_device(void* context, size_t s)
+void* wp_alloc_device(void* context, size_t s, const char* tag)
 {
     int ordinal = wp_cuda_context_get_device_ordinal(context);
 
-    // use stream-ordered allocator if available
     if (wp_cuda_device_is_mempool_supported(ordinal))
-        return wp_alloc_device_async(context, s);
+        return wp_alloc_device_async(context, s, tag);
     else
-        return wp_alloc_device_default(context, s);
+        return wp_alloc_device_default(context, s, tag);
 }
 
 void wp_free_device(void* context, void* ptr)
@@ -810,18 +804,23 @@ void wp_free_device(void* context, void* ptr)
         wp_free_device_default(context, ptr);
 }
 
-void* wp_alloc_device_default(void* context, size_t s)
+void* wp_alloc_device_default(void* context, size_t s, const char* tag)
 {
     ContextGuard guard(context);
 
     void* ptr = NULL;
     check_cuda(cudaMalloc(&ptr, s));
 
+    if (g_alloc_tracker.enabled && ptr)
+        g_alloc_tracker.record_alloc(ptr, s, ALLOC_KIND_DEVICE, wp_cuda_context_get_device_ordinal(context), tag);
     return ptr;
 }
 
 void wp_free_device_default(void* context, void* ptr)
 {
+    if (g_alloc_tracker.enabled && ptr)
+        g_alloc_tracker.record_free(ptr);
+
     ContextGuard guard(context);
 
 #if defined(__HIP_PLATFORM_AMD__)
@@ -838,7 +837,7 @@ void wp_free_device_default(void* context, void* ptr)
     }
 }
 
-void* wp_alloc_device_async(void* context, size_t s)
+void* wp_alloc_device_async(void* context, size_t s, const char* tag)
 {
     // stream-ordered allocations don't rely on the current context,
     // but we set the context here for consistent behaviour
@@ -877,11 +876,16 @@ void* wp_alloc_device_async(void* context, size_t s)
 #endif
     }
 
+    if (g_alloc_tracker.enabled && ptr)
+        g_alloc_tracker.record_alloc(ptr, s, ALLOC_KIND_DEVICE, wp_cuda_context_get_device_ordinal(context), tag);
     return ptr;
 }
 
 void wp_free_device_async(void* context, void* ptr)
 {
+    if (g_alloc_tracker.enabled && ptr)
+        g_alloc_tracker.record_free(ptr);
+
     // stream-ordered allocators generally don't rely on the current context,
     // but we set the context here for consistent behaviour
     ContextGuard guard(context);
@@ -1076,6 +1080,26 @@ bool wp_memcpy_d2d(void* context, void* dest, void* src, size_t n, void* stream)
 
     end_cuda_range(WP_TIMING_MEMCPY, cuda_stream);
 
+    // APIC recording.
+    // TODO: When execution becomes fully deferred (like the CPU path), move
+    // CUDA-result checking to replay time (capture_launch / load+launch) and
+    // make recording unconditional at capture time. For now we still execute
+    // the CUDA op live under stream capture, but the record itself is API-
+    // intent only and doesn't depend on the live call's result.
+    APICState apic_state = wp_apic_get_recording_state();
+    if (apic_state) {
+        int32_t dst_region, src_region;
+        uint64_t dst_offset, src_offset;
+        bool dst_ok = apic_resolve_ptr(apic_state, (uint64_t)dest, &dst_region, &dst_offset);
+        bool src_ok = apic_resolve_ptr(apic_state, (uint64_t)src, &src_region, &src_offset);
+        if (!dst_ok)
+            fprintf(stderr, "APIC: Error - memcpy dst pointer not in any registered region\n");
+        if (!src_ok)
+            fprintf(stderr, "APIC: Error - memcpy src pointer not in any registered region\n");
+        if (dst_ok && src_ok)
+            apic_record_memcpy_d2d(apic_state, dst_region, dst_offset, src_region, src_offset, n);
+    }
+
     return result;
 }
 
@@ -1228,25 +1252,38 @@ __global__ void memset_kernel(int* dest, int value, size_t n)
     }
 }
 
-void wp_memset_device(void* context, void* dest, int value, size_t n)
+bool wp_memset_device(void* context, void* dest, int value, size_t n, void* stream)
 {
     ContextGuard guard(context);
 
-    if (true)  // ((n%4) > 0)
-    {
-        cudaStream_t stream = get_current_stream();
+    cudaStream_t cuda_stream;
+    if (stream != WP_CURRENT_STREAM)
+        cuda_stream = static_cast<CUstream>(stream);
+    else
+        cuda_stream = get_current_stream();
 
-        begin_cuda_range(WP_TIMING_MEMSET, stream, context, "memset");
+    begin_cuda_range(WP_TIMING_MEMSET, cuda_stream, context, "memset");
 
-        // for unaligned lengths fallback to CUDA memset
-        check_cuda(cudaMemsetAsync(dest, value, n, stream));
+    bool result = check_cuda(cudaMemsetAsync(dest, value, n, cuda_stream));
 
-        end_cuda_range(WP_TIMING_MEMSET, stream);
-    } else {
-        // custom kernel to support 4-byte values (and slightly lower host overhead)
-        const size_t num_words = n / 4;
-        wp_launch_device(WP_CURRENT_CONTEXT, memset_kernel, num_words, ((int*)dest, value, num_words));
+    end_cuda_range(WP_TIMING_MEMSET, cuda_stream);
+
+    // APIC recording.
+    // TODO: When execution becomes fully deferred (like the CPU path), move
+    // CUDA-result checking to replay time (capture_launch / load+launch) and
+    // make recording unconditional at capture time. For now we still execute
+    // the CUDA op live under stream capture, but the record itself is API-
+    // intent only and doesn't depend on the live call's result.
+    APICState apic_state = wp_apic_get_recording_state();
+    if (apic_state) {
+        int32_t region_id;
+        uint64_t offset;
+        if (apic_resolve_ptr(apic_state, (uint64_t)dest, &region_id, &offset))
+            apic_record_memset(apic_state, region_id, offset, n, value);
+        else
+            fprintf(stderr, "APIC: Error - memset dst pointer not in any registered region\n");
     }
+    return result;
 }
 
 // fill memory buffer with a value: generic memtile kernel using memcpy for each element
@@ -2033,6 +2070,24 @@ int wp_cuda_driver_version()
 
 int wp_cuda_toolkit_version() { return CUDA_VERSION; }
 
+int wp_nvrtc_version()
+{
+    int major = 0, minor = 0;
+    nvrtcVersion(&major, &minor);
+    return major * 1000 + minor * 10;
+}
+
+const char* wp_libmathdx_version()
+{
+#if WP_ENABLE_MATHDX
+    static char version[64];
+    snprintf(version, sizeof(version), "%d.%d.%d", LIBMATHDX_VER_MAJOR, LIBMATHDX_VER_MINOR, LIBMATHDX_VER_PATCH);
+    return version;
+#else
+    return "";
+#endif
+}
+
 bool wp_cuda_driver_is_initialized() { return is_cuda_driver_initialized(); }
 
 int wp_nvrtc_supported_arch_count()
@@ -2091,6 +2146,13 @@ int wp_cuda_device_get_sm_count(int ordinal)
 {
     if (ordinal >= 0 && ordinal < int(g_devices.size()))
         return g_devices[ordinal].sm_count;
+    return 0;
+}
+
+int wp_cuda_device_get_max_shared_memory(int ordinal)
+{
+    if (ordinal >= 0 && ordinal < int(g_devices.size()))
+        return g_devices[ordinal].max_smem_bytes;
     return 0;
 }
 
@@ -3880,7 +3942,8 @@ bool check_nvjitlink_result(nvJitLinkHandle handle, nvJitLinkResult result, cons
 size_t wp_cuda_compile_program(
     const char* cuda_src,
     const char* program_name,
-    const char* arch,
+    int arch,
+    const char* arch_suffix,
     const char* include_dir,
     int num_cuda_include_dirs,
     const char** cuda_include_dirs,
@@ -3894,7 +3957,7 @@ size_t wp_cuda_compile_program(
     bool compile_time_trace,
     bool precompiled_headers,
     const char* output_path,
-    const char* kernel_cache_dir,
+    const char* pch_dir,
     size_t num_ltoirs,
     char** ltoirs,
     size_t* ltoir_sizes,
@@ -3930,8 +3993,12 @@ size_t wp_cuda_compile_program(
     // Reserve enough space to prevent vector reallocation which would invalidate c_str() pointers
     stored_options.reserve(32 + num_cuda_include_dirs);
 
-    if (arch && arch[0]) {
-        stored_options.push_back(std::string("--gpu-architecture=") + arch);
+    // On HIP, the CUDA-style numeric `arch` is unused; the full gfx target string
+    // (e.g. "gfx942") is passed in via `arch_suffix`. See the wp_cuda_compile_program
+    // declaration in warp.h for the calling convention.
+    (void)arch;
+    if (arch_suffix && arch_suffix[0]) {
+        stored_options.push_back(std::string("--gpu-architecture=") + arch_suffix);
         opts.push_back(stored_options.back().c_str());
     }
 
@@ -4110,7 +4177,6 @@ size_t wp_cuda_compile_program(
         int minor = 0;
         nvrtcVersion(&major, &minor);
         printf("NVRTC version %d.%d\n", major, minor);
-        printf("Kernel cache directory: %s\n", kernel_cache_dir);
     }
 
     char include_opt[max_path];
@@ -4121,29 +4187,15 @@ size_t wp_cuda_compile_program(
     char arch_opt[max_arch];
     char arch_opt_lto[max_arch];
 
-    if (!arch || !arch[0]) {
-        fprintf(stderr, "Warp error: Invalid CUDA architecture\n");
-        return size_t(-1);
-    }
-
-    const char* arch_str = arch;
-    if (strncmp(arch_str, "sm_", 3) == 0)
-        arch_str += 3;
-    else if (strncmp(arch_str, "compute_", 8) == 0)
-        arch_str += 8;
-
-    int arch_int = std::atoi(arch_str);
-    if (arch_int <= 0) {
-        fprintf(stderr, "Warp error: Invalid CUDA architecture '%s'\n", arch);
-        return size_t(-1);
-    }
+    // arch_suffix is "" (no suffix), "a" (arch-specific), or "f" (family-specific)
+    const char* suffix = (arch_suffix != nullptr) ? arch_suffix : "";
 
     if (use_ptx) {
-        snprintf(arch_opt, max_arch, "--gpu-architecture=compute_%d", arch_int);
-        snprintf(arch_opt_lto, max_arch, "-arch=compute_%d", arch_int);
+        snprintf(arch_opt, max_arch, "--gpu-architecture=compute_%d%s", arch, suffix);
+        snprintf(arch_opt_lto, max_arch, "-arch=compute_%d%s", arch, suffix);
     } else {
-        snprintf(arch_opt, max_arch, "--gpu-architecture=sm_%d", arch_int);
-        snprintf(arch_opt_lto, max_arch, "-arch=sm_%d", arch_int);
+        snprintf(arch_opt, max_arch, "--gpu-architecture=sm_%d%s", arch, suffix);
+        snprintf(arch_opt_lto, max_arch, "-arch=sm_%d%s", arch, suffix);
     }
 
     std::vector<const char*> opts;
@@ -4179,8 +4231,11 @@ size_t wp_cuda_compile_program(
         opts.push_back("-pch");
 #if CUDA_VERSION < 13000
         // CUDA 12.x series puts .pch files in the current working directory unless explicitly set
-        if (kernel_cache_dir != nullptr) {
-            std::string pch_dir_opt = std::string("--pch-dir=") + kernel_cache_dir;
+        if (pch_dir != nullptr) {
+            if (print_debug) {
+                printf("PCH directory: %s\n", pch_dir);
+            }
+            std::string pch_dir_opt = std::string("--pch-dir=") + pch_dir;
             stored_options.push_back(pch_dir_opt);
             opts.push_back(stored_options.back().c_str());
         }
@@ -4879,7 +4934,8 @@ size_t wp_cuda_launch_kernel(
     int block_dim,
     int shared_memory_bytes,
     void** args,
-    void* stream
+    void* stream,
+    const APICLaunchInfo* apic_info
 )
 {
     ContextGuard guard(context);
@@ -4935,14 +4991,64 @@ size_t wp_cuda_launch_kernel(
 
     end_cuda_range(WP_TIMING_KERNEL, stream);
 
+    // APIC recording: record kernel launch to byte stream if capturing
+    if (apic_info) {
+        APICState state = wp_apic_get_recording_state();
+        if (state) {
+            // Read shape/ndim/size from the launch_bounds_t* in args[0] (see builtin.h).
+            int shape[APIC_LAUNCH_MAX_DIMS] = {};
+            int ndim = 0;
+            uint64_t launch_size = dim;
+            if (args && args[0]) {
+                const auto* lb = static_cast<const wp::launch_bounds_t*>(args[0]);
+                ndim = lb->ndim;
+                if (ndim < 1)
+                    ndim = 1;
+                if (ndim > APIC_LAUNCH_MAX_DIMS)
+                    ndim = APIC_LAUNCH_MAX_DIMS;
+                for (int d = 0; d < ndim; d++)
+                    shape[d] = lb->shape[d];
+                launch_size = lb->size;
+            } else {
+                ndim = 1;
+                shape[0] = (int)dim;
+            }
+
+            apic_record_kernel_launch(
+                state, apic_info->kernel_key, apic_info->module_hash, apic_info->is_forward, shape, ndim, launch_size,
+                max_blocks, block_dim, shared_memory_bytes, apic_info->params, apic_info->num_params
+            );
+        }
+    }
+
     return res;
 }
 
-void wp_cuda_graphics_map(void* context, void* resource)
+bool wp_cuda_get_suggested_block_size(
+    void* context, void* kernel, int shared_memory_bytes, int* block_size_out, int* min_grid_size_out
+)
 {
     ContextGuard guard(context);
 
-    check_cu(cuGraphicsMapResources_f(1, (CUgraphicsResource*)resource, get_current_stream()));
+    int min_grid_size = 0;
+    int block_size = 0;
+    CUresult res = cuOccupancyMaxPotentialBlockSize_f(
+        &min_grid_size, &block_size, (CUfunction)kernel, NULL, shared_memory_bytes, 0
+    );
+
+    if (!check_cu(res))
+        return false;
+
+    *block_size_out = block_size;
+    *min_grid_size_out = min_grid_size;
+    return true;
+}
+
+bool wp_cuda_graphics_map(void* context, void* resource)
+{
+    ContextGuard guard(context);
+
+    return check_cu(cuGraphicsMapResources_f(1, (CUgraphicsResource*)resource, get_current_stream()));
 }
 
 void wp_cuda_graphics_unmap(void* context, void* resource)
@@ -4980,6 +5086,33 @@ void* wp_cuda_graphics_register_gl_buffer(void* context, uint32_t gl_buffer, uns
     }
 
     return resource;
+}
+
+void* wp_cuda_graphics_register_gl_image(void* context, uint32_t image, uint32_t target, unsigned int flags)
+{
+    ContextGuard guard(context);
+
+    CUgraphicsResource* resource = new CUgraphicsResource;
+    bool success = check_cu(cuGraphicsGLRegisterImage_f(resource, image, target, flags));
+    if (!success) {
+        delete resource;
+        return NULL;
+    }
+
+    return resource;
+}
+
+uint64_t wp_cuda_graphics_sub_resource_get_mapped_array(
+    void* context, void* resource, unsigned int array_index, unsigned int mip_level
+)
+{
+    ContextGuard guard(context);
+
+    CUarray cuda_array = NULL;
+    check_cu(
+        cuGraphicsSubResourceGetMappedArray_f(&cuda_array, *(CUgraphicsResource*)resource, array_index, mip_level)
+    );
+    return reinterpret_cast<uint64_t>(cuda_array);
 }
 
 void wp_cuda_graphics_unregister_resource(void* context, void* resource)
@@ -5032,3 +5165,6 @@ void wp_cuda_timing_end(timing_result_t* results, int size)
 
 // #include "spline.inl"
 // #include "volume.inl"
+
+// APIC (API Capture) implementation
+#include "apic.cu"

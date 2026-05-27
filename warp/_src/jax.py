@@ -1,17 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 import warp
 
@@ -99,6 +87,7 @@ def dtype_to_jax(warp_dtype):
 
         dtype_to_jax.type_map = {
             warp.float16: jp.float16,
+            warp.bfloat16: jp.bfloat16,
             warp.float32: jp.float32,
             warp.float64: jp.float64,
             warp.int8: jp.int8,
@@ -132,6 +121,7 @@ def dtype_from_jax(jax_dtype):
         dtype_from_jax.type_map = {
             # Jax scalar types
             jp.float16: warp.float16,
+            jp.bfloat16: warp.bfloat16,
             jp.float32: warp.float32,
             jp.float64: warp.float64,
             jp.int8: warp.int8,
@@ -145,6 +135,7 @@ def dtype_from_jax(jax_dtype):
             jp.bool_: warp.bool,
             # Jax dtype objects
             jp.dtype(jp.float16): warp.float16,
+            jp.dtype(jp.bfloat16): warp.bfloat16,
             jp.dtype(jp.float32): warp.float32,
             jp.dtype(jp.float64): warp.float64,
             jp.dtype(jp.int8): warp.int8,
@@ -190,7 +181,7 @@ def from_jax(jax_array, dtype=None) -> warp.array:
 
     Args:
         jax_array (jax.Array): The Jax array to convert.
-        dtype (optional): The target data type of the resulting Warp array. Defaults to the Jax array's data type mapped to a Warp data type.
+        dtype: The target data type of the resulting Warp array. Defaults to the Jax array's data type mapped to a Warp data type.
 
     Returns:
         warp.array: The converted Warp array.
