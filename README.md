@@ -1,29 +1,42 @@
-[![PyPI version](https://badge.fury.io/py/warp-lang.svg)](https://badge.fury.io/py/warp-lang)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
-![GitHub commit activity](https://img.shields.io/github/commit-activity/m/NVIDIA/warp?link=https%3A%2F%2Fgithub.com%2FNVIDIA%2Fwarp%2Fcommits%2Fmain)
-[![Downloads](https://static.pepy.tech/badge/warp-lang/month)](https://pepy.tech/project/warp-lang)
-[![codecov](https://codecov.io/github/NVIDIA/warp/graph/badge.svg?token=7O1KSM79FG)](https://codecov.io/github/NVIDIA/warp)
-![GitHub - CI](https://github.com/NVIDIA/warp/actions/workflows/ci.yml/badge.svg)
 
-# NVIDIA Warp
+# Warp — AMD ROCm port (v1.13.0 base)
 
-**[Documentation](https://nvidia.github.io/warp/)** | [Changelog](https://github.com/NVIDIA/warp/blob/main/CHANGELOG.md)
+This repository is AMD's port of [NVIDIA Warp](https://github.com/NVIDIA/warp) to ROCm/HIP.
+It tracks upstream Warp at tag **`v1.13.0`** and adds a HIP backend that targets AMD CDNA3 GPUs.
 
-Warp is a Python framework for GPU-accelerated simulation, robotics, and machine learning. Warp takes
-regular Python functions and JIT compiles them to efficient kernel code that can run on the CPU or GPU.
+For upstream Warp's documentation, language reference, and changelog see
+**[Documentation](https://nvidia.github.io/warp/)** and
+[CHANGELOG.md](https://github.com/NVIDIA/warp/blob/main/CHANGELOG.md).
 
-Warp comes with a rich set of primitives for physics simulation, robotics, geometry processing,
-and more. Warp kernels are differentiable and can be used as part of machine-learning pipelines
-with frameworks such as PyTorch, JAX and Paddle.
+---
 
-<div align="center">
-    <img src="https://github.com/NVIDIA/warp/raw/main/docs/img/header.jpg">
-    <p><i>A selection of physical simulations computed with Warp</i></p>
-</div>
+## What this fork is and isn't
+
+Warp is a Python framework that JIT-compiles regular Python kernels to efficient GPU code.
+Upstream targets NVIDIA GPUs via CUDA/NVRTC. **This fork lets the same Python kernels run on
+AMD Instinct GPUs via HIP/HIPRTC**, while keeping the upstream CUDA path bit-for-bit
+identical when you build with `--no-rocm-path`.
+
+It is *not* a full ROCm replacement for every Warp feature — the
+[Deferred features](#deferred-features-on-the-hip-path) section enumerates what's currently
+gated off on HIP. Everything else — kernels, tile primitives, BVH, mesh queries, HashGrid,
+volumes, autograd, DLPack/PyTorch/JAX interop, fp16, bf16, and the example suite — is in scope.
+
+## Supported configurations
+
+| Component       | Supported                                              | Notes |
+|-----------------|--------------------------------------------------------|-------|
+| GPU             | `gfx942` (MI300x, MI325x); `gfx950` (MI355x)           | `gfx90a` is not in the default target list |
+| ROCm            | 7.x; tested with TheRock 7.9 nightly snapshots         | See `docker/rocm_ci/Dockerfile.TheRock_ci` |
+| Host OS         | Linux (Ubuntu 24.04 in CI; modern glibc required)      | Windows HIP is rejected at build time |
+| Python          | 3.10+                                                  | Same minimum as upstream v1.13.0 |
+| PyTorch         | 2.9+ ROCm wheels (`pip --pre torch` from rocm.nightlies)| Used by `example_torch_diffray.py`; optional |
+
+NVIDIA hardware is supported unchanged: build without `--rocm-path` (and with `ROCM_PATH`
+unset / no `hipcc` on `PATH`) and the result is identical to upstream `v1.13.0`.
 
 ## Quick Start
-
-Simulate one million particles under gravitational attraction, in 20 lines:
 
 ```python
 import warp as wp
@@ -33,11 +46,11 @@ num_particles = 1_000_000
 dt = 0.01
 
 @wp.kernel
-def gravity_step(pos: wp.array[wp.vec3], vel: wp.array[wp.vec3]):
+def gravity_step(pos: wp.array(dtype=wp.vec3), vel: wp.array(dtype=wp.vec3)):
     i = wp.tid()
     position = pos[i]
-    dist_sq = wp.length_sq(position) + 0.01  # softened distance
-    acc = -1000.0 / dist_sq * wp.normalize(position)  # gravitational pull toward origin
+    dist_sq = wp.length_sq(position) + 0.01
+    acc = -1000.0 / dist_sq * wp.normalize(position)
     vel[i] = vel[i] + acc * dt
     pos[i] = pos[i] + vel[i] * dt
 
@@ -51,264 +64,122 @@ for _ in range(100):
 print(positions.numpy())
 ```
 
-## Installing
+## Building from source
 
-Python version 3.10 or newer is required. Warp can run on x86-64 and ARMv8 CPUs on Windows and Linux, and on Apple Silicon (ARMv8) on macOS.
-GPU support requires a CUDA-capable NVIDIA GPU and driver (minimum GeForce GTX 9xx).
+### Prerequisites
 
-The easiest way to install Warp is from [PyPI](https://pypi.org/project/warp-lang/):
+* A ROCm 7.x install (`hipcc` reachable via `PATH`, `ROCM_PATH`, `ROCM_HOME`, or under `/opt/rocm`)
+* GCC 14 / libstdc++ 14 (Ubuntu 24.04 default works out of the box)
+* Python 3.10+ with `numpy` available for the build script
 
-```text
-pip install warp-lang
+### Build
+
+```bash
+git clone https://github.com/ROCm/warp.git
+cd warp
+
+# Auto-detects ROCm; defaults --hip-arch to gfx942,gfx950
+python build_lib.py --jobs $(nproc)
+
+pip install -e .
 ```
 
-You can also use `pip install warp-lang[examples]` to install additional dependencies for running examples and USD-related features.
+To target a single GPU family or a non-default arch list:
 
-For nightly builds, conda, CUDA 13 builds, building from source, and CUDA driver requirements, see the
-[Installation Guide](https://nvidia.github.io/warp/user_guide/installation.html).
-
-## Tutorial Notebooks
-
-The [NVIDIA Accelerated Computing Hub](https://github.com/NVIDIA/accelerated-computing-hub) contains the current,
-actively maintained set of Warp tutorials:
-
-| Notebook | Colab Link |
-|----------|------------|
-| [Introduction to NVIDIA Warp](https://github.com/NVIDIA/accelerated-computing-hub/blob/32fe3d5a448446fd52c14a6726e1b867cbfed2d9/Accelerated_Python_User_Guide/notebooks/Chapter_12_Intro_to_NVIDIA_Warp.ipynb) | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/NVIDIA/accelerated-computing-hub/blob/32fe3d5a448446fd52c14a6726e1b867cbfed2d9/Accelerated_Python_User_Guide/notebooks/Chapter_12_Intro_to_NVIDIA_Warp.ipynb) |
-| [GPU-Accelerated Ising Model Simulation in NVIDIA Warp](https://github.com/NVIDIA/accelerated-computing-hub/blob/32fe3d5a448446fd52c14a6726e1b867cbfed2d9/Accelerated_Python_User_Guide/notebooks/Chapter_12.1_IsingModel_In_Warp.ipynb) | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/NVIDIA/accelerated-computing-hub/blob/32fe3d5a448446fd52c14a6726e1b867cbfed2d9/Accelerated_Python_User_Guide/notebooks/Chapter_12.1_IsingModel_In_Warp.ipynb) |
-
-Additionally, several notebooks in the [notebooks](https://github.com/NVIDIA/warp/tree/main/notebooks) directory
-provide additional examples and cover key Warp features:
-
-| Notebook | Colab Link |
-|----------|------------|
-| [Warp Core Tutorial: Basics](https://github.com/NVIDIA/warp/blob/main/notebooks/core_01_basics.ipynb) | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/NVIDIA/warp/blob/main/notebooks/core_01_basics.ipynb) |
-| [Warp Core Tutorial: Generics](https://github.com/NVIDIA/warp/blob/main/notebooks/core_02_generics.ipynb) | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/NVIDIA/warp/blob/main/notebooks/core_02_generics.ipynb) |
-| [Warp Core Tutorial: Points](https://github.com/NVIDIA/warp/blob/main/notebooks/core_03_points.ipynb) | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/NVIDIA/warp/blob/main/notebooks/core_03_points.ipynb) |
-| [Warp Core Tutorial: Meshes](https://github.com/NVIDIA/warp/blob/main/notebooks/core_04_meshes.ipynb) | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/NVIDIA/warp/blob/main/notebooks/core_04_meshes.ipynb) |
-| [Warp Core Tutorial: Volumes](https://github.com/NVIDIA/warp/blob/main/notebooks/core_05_volumes.ipynb) | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/NVIDIA/warp/blob/main/notebooks/core_05_volumes.ipynb) |
-| [Warp PyTorch Tutorial: Basics](https://github.com/NVIDIA/warp/blob/main/notebooks/pytorch_01_basics.ipynb) | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/NVIDIA/warp/blob/main/notebooks/pytorch_01_basics.ipynb) |
-| [Warp PyTorch Tutorial: Custom Operators](https://github.com/NVIDIA/warp/blob/main/notebooks/pytorch_02_custom_operators.ipynb) | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/NVIDIA/warp/blob/main/notebooks/pytorch_02_custom_operators.ipynb) |
-
-## Running Examples
-
-The [warp/examples](https://github.com/NVIDIA/warp/tree/main/warp/examples) directory contains examples
-covering physics simulation, geometry processing, optimization, and tile-based GPU programming.
-Before running examples, install the optional example dependencies using:
-
-```text
-pip install warp-lang[examples]
+```bash
+python build_lib.py --rocm-path /opt/rocm --hip-arch gfx942
+# or
+python build_lib.py --rocm-path /opt/rocm --hip-arch gfx950
+# or via env vars
+HIP_ARCH=gfx942,gfx950 python build_lib.py
 ```
 
-On Linux aarch64 systems (e.g., NVIDIA DGX Spark), the `[examples]` extra automatically installs
-[`usd-exchange`](https://pypi.org/project/usd-exchange/) instead of `usd-core` as a drop-in replacement,
-since `usd-core` wheels are not available for that platform.
+To build the CUDA path on an NVIDIA system, run as upstream does (no `--rocm-path`,
+no ROCm autodetected):
 
-Examples can be run from the command-line as follows:
-
-```text
-python -m warp.examples.<example_subdir>.<example>
+```bash
+python build_lib.py --jobs $(nproc) --cuda-path /usr/local/cuda
 ```
 
-Most examples can be run on either the CPU or a CUDA-capable device, but a handful require a CUDA-capable device. These are marked at the top of the example script. Some examples generate USD files containing time-sampled animations in the current working directory. These can be viewed in Pixar's UsdView, Blender, or any USD-compatible viewer.
+To build a CPU-only library (no CUDA, no HIP):
 
-To browse the example source code, you can open the directory where the files are located like this:
-
-```text
-python -m warp.examples.browse
+```bash
+python build_lib.py --no-cuda
 ```
 
-### warp/examples/core
+### Build flags reference
 
-<table>
-    <tbody>
-        <tr>
-            <td width="25%"><a href="https://github.com/NVIDIA/warp/blob/main/warp/examples/core/example_dem.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/core_dem.png"></a></td>
-            <td width="25%"><a href="https://github.com/NVIDIA/warp/blob/main/warp/examples/core/example_fluid.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/core_fluid.png"></a></td>
-            <td width="25%"><a href="https://github.com/NVIDIA/warp/blob/main/warp/examples/core/example_graph_capture.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/core_graph_capture.png"></a></td>
-            <td width="25%"><a href="https://github.com/NVIDIA/warp/blob/main/warp/examples/core/example_marching_cubes.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/core_marching_cubes.png"></a></td>
-        </tr>
-        <tr>
-            <td align="center">dem</td>
-            <td align="center">fluid</td>
-            <td align="center">graph capture</td>
-            <td align="center">marching cubes</td>
-        </tr>
-        <tr>
-            <td width="25%"><a href="https://github.com/NVIDIA/warp/blob/main/warp/examples/core/example_mesh.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/core_mesh.png"></a></td>
-            <td width="25%"><a href="https://github.com/NVIDIA/warp/blob/main/warp/examples/core/example_nvdb.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/core_nvdb.png"></a></td>
-            <td width="25%"><a href="https://github.com/NVIDIA/warp/blob/main/warp/examples/core/example_raycast.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/core_raycast.png"></a></td>
-            <td width="25%"><a href="https://github.com/NVIDIA/warp/blob/main/warp/examples/core/example_raymarch.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/core_raymarch.png"></a></td>
-        </tr>
-        <tr>
-            <td align="center">mesh</td>
-            <td align="center">nvdb</td>
-            <td align="center">raycast</td>
-            <td align="center">raymarch</td>
-        </tr>
-        <tr>
-            <td width="25%"><a href="https://github.com/NVIDIA/warp/blob/main/warp/examples/core/example_sample_mesh.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/core_sample_mesh.png"></a></td>
-            <td width="25%"><a href="https://github.com/NVIDIA/warp/blob/main/warp/examples/core/example_sph.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/core_sph.png"></a></td>
-            <td width="25%"><a href="https://github.com/NVIDIA/warp/blob/main/warp/examples/core/example_torch.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/core_torch.png"></a></td>
-            <td width="25%"><a href="https://github.com/NVIDIA/warp/blob/main/warp/examples/core/example_wave.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/core_wave.png"></a></td>
-        </tr>
-        <tr>
-            <td align="center">sample mesh</td>
-            <td align="center">sph</td>
-            <td align="center">torch</td>
-            <td align="center">wave</td>
-        </tr>
-        <tr>
-            <td width="25%"><a href="https://github.com/NVIDIA/warp/blob/main/warp/examples/core/example_fft_poisson_navier_stokes_2d.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/core_fft_poisson_navier_stokes_2d.png"></a></td>
-        </tr>
-        <tr>
-            <td align="center">2-D incompressible turbulence in a periodic box</td>
-        </tr>
-    </tbody>
-</table>
+| Flag                                  | Default                | Effect |
+|---------------------------------------|------------------------|--------|
+| `--rocm-path PATH`                    | autodetect             | Enables HIP build using this ROCm SDK |
+| `--hip-arch gfx942[,gfx950,...]`      | `gfx942,gfx950`        | AMD GPU targets passed to `hipcc --offload-arch` |
+| `--cuda-path PATH`                    | autodetect             | Path to CUDA Toolkit (mutually exclusive with `--no-cuda`) |
+| `--no-cuda`                           | off                    | Skip CUDA path entirely (CPU-only or HIP-only) |
+| `--no-use-libmathdx`                  | off                    | Disable cuBLASDx/cuFFTDx/cuSOLVERDx (auto-disabled on HIP) |
+| `--quick`                             | off                    | Compile for fewer GPU archs to speed up dev builds |
 
-### warp/examples/fem
+The HIP path implicitly disables libmathdx (`mathdx_enabled=0`) since cuBLASDx/cuFFTDx/cuSOLVERDx
+have no AMD equivalent. Tile FFT and tile matmul that depend on libmathdx will raise
+`NotImplementedError` on HIP devices.
 
-<table>
-    <tbody>
-        <tr>
-            <td width="25%"><a href="https://github.com/NVIDIA/warp/blob/main/warp/examples/fem/example_diffusion_3d.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/fem_diffusion_3d.png"></a></td>
-            <td width="25%"><a href="https://github.com/NVIDIA/warp/blob/main/warp/examples/fem/example_mixed_elasticity.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/fem_mixed_elasticity.png"></a></td>
-            <td width="25%"><a href="https://github.com/NVIDIA/warp/blob/main/warp/examples/fem/example_apic_fluid.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/fem_apic_fluid.png"></a></td>
-            <td width="25%"><a href="https://github.com/NVIDIA/warp/blob/main/warp/examples/fem/example_streamlines.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/fem_streamlines.png"></a></td>
-        </tr>
-        <tr>
-            <td align="center">diffusion 3d</td>
-            <td align="center">mixed elasticity</td>
-            <td align="center">apic fluid</td>
-            <td align="center">streamlines</td>
-        </tr>
-        <tr>
-            <td width="25%"><a href="https://github.com/NVIDIA/warp/blob/main/warp/examples/fem/example_distortion_energy.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/fem_distortion_energy.png"></a></td>
-            <td width="25%"><a href="https://github.com/NVIDIA/warp/blob/main/warp/examples/fem/example_taylor_green.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/fem_taylor_green.png"></a></td>
-            <td width="25%"><a href="https://github.com/NVIDIA/warp/blob/main/warp/examples/fem/example_kelvin_helmholtz.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/fem_kelvin_helmholtz.png"></a></td>
-            <td width="25%"><a href="https://github.com/NVIDIA/warp/blob/main/warp/examples/fem/example_magnetostatics.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/fem_magnetostatics.png"></a></td>
-        </tr>
-        <tr>
-            <td align="center">distortion energy</td>
-            <td align="center">taylor green</td>
-            <td align="center">kelvin helmholtz</td>
-            <td align="center">magnetostatics</td>
-        </tr>
-        <tr>
-            <td width="25%"><a href="https://github.com/NVIDIA/warp/blob/main/warp/examples/fem/example_adaptive_grid.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/fem_adaptive_grid.png"></a></td>
-            <td width="25%"><a href="https://github.com/NVIDIA/warp/blob/main/warp/examples/fem/example_nonconforming_contact.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/fem_nonconforming_contact.png"></a></td>
-            <td width="25%"><a href="https://github.com/NVIDIA/warp/blob/main/warp/examples/fem/example_darcy_ls_optimization.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/fem_darcy_ls_optimization.png"></a></td>
-            <td width="25%"><a href="https://github.com/NVIDIA/warp/blob/main/warp/examples/fem/example_elastic_shape_optimization.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/fem_elastic_shape_optimization.png"></a></td>
-        </tr>
-        <tr>
-            <td align="center">adaptive grid</td>
-            <td align="center">nonconforming contact</td>
-            <td align="center">darcy level-set optimization</td>
-            <td align="center">elastic shape optimization</td>
-        </tr>
-    </tbody>
-</table>
+### Container build
 
-### warp/examples/optim
+A self-contained TheRock-based ROCm image is provided at
+`docker/rocm_ci/Dockerfile.TheRock_ci`. Default arch is `gfx942`; override via build args
+to target other families:
 
-<table>
-    <tbody>
-        <tr>
-            <td width="25%"><a href="https://github.com/NVIDIA/warp/blob/main/warp/examples/optim/example_diffray.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/optim_diffray.png"></a></td>
-            <td width="25%"><a href="https://github.com/NVIDIA/warp/blob/main/warp/examples/optim/example_fluid_checkpoint.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/optim_fluid_checkpoint.png"></a></td>
-            <td width="25%"><a href="https://github.com/NVIDIA/warp/blob/main/warp/examples/optim/example_particle_repulsion.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/optim_particle_repulsion.png"></a></td>
-            <td width="25%"><a href="https://github.com/NVIDIA/warp/blob/main/warp/examples/optim/example_navier_stokes_perturbation.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/optim_navier_stokes_perturbation.png"></a></td>
-        </tr>
-        <tr>
-            <td align="center">diffray</td>
-            <td align="center">fluid checkpoint</td>
-            <td align="center">particle repulsion</td>
-            <td align="center">navier-stokes perturbation</td>
-        </tr>
-    </tbody>
-</table>
+```bash
+docker buildx build \
+    --build-context warp_src=. \
+    -f docker/rocm_ci/Dockerfile.TheRock_ci \
+    --target warp_base \
+    --build-arg ROCM_AMDGPU_TARGETS=gfx942 \
+    --build-arg PYTORCH_ROCM_ARCH=gfx942 \
+    -t warp:rocm-gfx942 .
+```
 
-### warp/examples/tile
+## Deferred features on the HIP path
 
-<table>
-    <tbody>
-        <tr>
-            <td width="25%"><a href="https://github.com/NVIDIA/warp/blob/main/warp/examples/tile/example_tile_mlp.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/tile_mlp.png"></a></td>
-            <td width="25%"><a href="https://github.com/NVIDIA/warp/blob/main/warp/examples/tile/example_tile_nbody.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/tile_nbody.png"></a></td>
-            <td width="25%"><a href="https://github.com/NVIDIA/warp/blob/main/warp/examples/tile/example_tile_mcgp.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/tile_mcgp.png"></a></td>
-            <td width="25%"></td>
-        </tr>
-        <tr>
-            <td align="center">mlp</td>
-            <td align="center">nbody</td>
-            <td align="center">mcgp</td>
-            <td align="center"></td>
-        </tr>
-    </tbody>
-</table>
+The following features are present on the CUDA path but currently gated off when running on
+AMD GPUs. Their absence is reported via `NotImplementedError` (Python) or by skipping the
+corresponding tests:
 
-## Learn More
+| Feature                          | Status on HIP                   | Reason |
+|----------------------------------|---------------------------------|--------|
+| CUDA Graph capture               | `wp.capture_begin()` returns False; tests skipped | HIP graph capture has correctness gaps in ROCm 7.x |
+| Conditional graph nodes          | Not supported                   | No HIP equivalent for `cuGraphAddNode(CONDITIONAL)` |
+| APIC GPU-side capture            | Not supported                   | Depends on cuMemPool* APIs without ROCm equivalents |
+| cuBQL BVH backend                | Disabled; falls back to Karras LBVH | cuBQL templates assume NVIDIA-only intrinsics |
+| RMM allocator                    | Disabled                        | RMM has no HIP backend |
+| GLTextureResource                | Disabled                        | OpenGL/HIP interop is not wired up |
+| Texture sampling (1D/2D/3D)      | Returns zero                    | HIP image support is off on CDNA3 |
+| `libmathdx` (cuBLASDx/cuFFTDx/cuSOLVERDx) | Disabled               | NVIDIA-only library |
+| Tile FFT (`tile_fft`)            | `NotImplementedError`           | Needs rocFFT integration (out of scope for this milestone) |
 
-Please see the following resources for additional background on Warp:
+If you need any of these, please file an issue against this fork — most are *deferred*, not
+*rejected*, and will follow once the core port is stable on `v1.13.0`.
 
-* [Product Page](https://developer.nvidia.com/warp-python)
-* [SIGGRAPH 2024 Course Slides](https://dl.acm.org/doi/10.1145/3664475.3664543)
-* [GTC 2024 Presentation](https://www.nvidia.com/en-us/on-demand/session/gtc24-s63345/)
-* [GTC 2022 Presentation](https://www.nvidia.com/en-us/on-demand/session/gtcspring22-s41599)
-* [GTC 2021 Presentation](https://www.nvidia.com/en-us/on-demand/session/gtcspring21-s31838)
-* [SIGGRAPH Asia 2021 Differentiable Simulation Course](https://dl.acm.org/doi/abs/10.1145/3476117.3483433)
+## Architectural notes for contributors
 
-## Support
+The HIP backend is structured to keep upstream code paths intact:
 
-See the [FAQ](https://nvidia.github.io/warp/user_guide/faq.html) for common questions.
+* `warp/native/hip_util.h` — pure C++ shim that maps `cu*` / `nvrtc*` symbols to the matching
+  HIP entry points. CUDA-only files include `hip_util.h` under `#if defined(__HIP_PLATFORM_AMD__)`
+  and use the unmodified CUDA symbol names everywhere else.
+* `warp/native/cuda_util.cpp` and `warp.cu` — `pfn_cu*_f` function pointers are gated; on HIP
+  they resolve via `hipGetProcAddress`. Image, conditional-graph, and memory-batch entry points
+  return `HIP_ERROR_NOT_SUPPORTED` (or compile-out) on HIP.
+* `warp/native/tile.h` — warp size is `64`, `tile_mask_t` widens to `uint64`, `WP_TILE_SHARED_ARRAY`
+  uses raw byte buffers to defeat HIPRTC's refusal of `__shared__` non-trivial types.
+* `warp/native/bvh.cu` — Karras LBVH builder replaces the persistent-scratch builder on HIP only;
+  the CUDA path is preserved verbatim under `#if !defined(__HIP_PLATFORM_AMD__)`.
+* `warp/native/mesh.h` — HIP gets a stack-based speculative ray traversal because HIP atomics
+  / fences don't satisfy the original implementation's invariants.
+* `warp/_src/context.py` — `Device.is_hip`, `Device.arch_str`, `Runtime.is_hip` plus arch-string
+  return paths from `get_cuda_supported_archs()`.
 
-Problems, questions, and feature requests can be opened on [GitHub Issues](https://github.com/NVIDIA/warp/issues).
-
-For inquiries not suited for GitHub Issues, please email <warp-python@nvidia.com>.
-
-## Contributing
-
-Contributions and pull requests from the community are welcome.
-Please see the [Contribution Guide](https://nvidia.github.io/warp/user_guide/contribution_guide.html) for more
-information on contributing to the development of Warp.
+The upstream Warp test suite is run with HIP-aware skips for the deferred features above.
 
 ## License
 
-Warp is provided under the Apache License, Version 2.0.
-Please see [LICENSE.md](https://github.com/NVIDIA/warp/blob/main/LICENSE.md) for full license text.
-
-This project will download and install additional third-party open source software projects.
-Review the license terms of these open source projects before use.
-
-### Building from Source
-
-When building Warp from source using the `build_lib.py` script, the build process automatically
-downloads [NVIDIA libmathdx](https://developer.nvidia.com/cublasdx-downloads). Pre-built Warp
-packages (e.g., from PyPI) already include libmathdx statically linked into the library binaries.
-In both cases, libmathdx is governed by the
-[NVIDIA Software License Agreement](https://github.com/NVIDIA/warp/blob/main/licenses/libmathdx-LICENSE.txt).
-
-NOTICE AND DISCLAIMER: This software automatically retrieves, accesses or interacts with external
-materials. Those retrieved materials are not distributed with this software and are governed solely
-by separate terms, conditions and licenses. You are solely responsible for finding, reviewing and
-complying with all applicable terms, conditions, and licenses, and for verifying the security,
-integrity and suitability of any retrieved materials for your specific use case. This software is
-provided "AS IS", without warranty of any kind. The author makes no representations or warranties
-regarding any retrieved materials, and assumes no liability for any losses, damages, liabilities or
-legal consequences from your use or inability to use this software or any retrieved materials. Use
-this software and the retrieved materials at your own risk.
-
-## Publications & Citation
-
-### Research Using Warp
-
-Our [PUBLICATIONS.md](https://github.com/NVIDIA/warp/blob/main/PUBLICATIONS.md) file lists academic and research
-publications that leverage the capabilities of Warp.
-We encourage you to add your own published work using Warp to this list.
-
-### Citing Warp
-
-If you use Warp in your research, please use the "Cite this repository" button on the
-[GitHub repository](https://github.com/NVIDIA/warp) page or refer to the
-[CITATION.cff](https://github.com/NVIDIA/warp/blob/main/CITATION.cff) file for citation information.
+Apache 2.0, identical to upstream Warp. See [LICENSE.md](./LICENSE.md).
