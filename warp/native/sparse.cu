@@ -10,9 +10,15 @@
 
 #define THRUST_IGNORE_CUB_VERSION_CHECK
 
+#if defined(__HIP_PLATFORM_AMD__)
+#include "hip_util.h"
+#include <hipcub/hipcub.hpp>
+namespace cub = hipcub;
+#else
 #include <cub/device/device_radix_sort.cuh>
 #include <cub/device/device_run_length_encode.cuh>
 #include <cub/device/device_scan.cuh>
+#endif
 
 extern CUcontext get_current_context();
 
@@ -103,12 +109,12 @@ struct BsrBlockInMask {
 template <typename T>
 __global__ void bsr_fill_triplet_key_values(
     const int nnz,
-    const int* tpl_rows,
-    const int* tpl_columns,
+    const int* WP_RESTRICT tpl_rows,
+    const int* WP_RESTRICT tpl_columns,
     const BsrBlockIsNotZero<T> nonZero,
     const BsrBlockInMask mask,
-    int* block_indices,
-    BsrRowCol* tpl_row_col
+    int* WP_RESTRICT block_indices,
+    BsrRowCol* WP_RESTRICT tpl_row_col
 )
 {
     int block = blockIdx.x * blockDim.x + threadIdx.x;
@@ -126,7 +132,10 @@ __global__ void bsr_fill_triplet_key_values(
 
 template <typename T>
 __global__ void
-bsr_find_row_offsets(uint32_t row_count, const T* d_nnz, const BsrRowCol* unique_row_col, int* row_offsets)
+bsr_find_row_offsets(
+    uint32_t row_count, const T* WP_RESTRICT d_nnz, const BsrRowCol* WP_RESTRICT unique_row_col,
+    int* WP_RESTRICT row_offsets
+)
 {
     const uint32_t row = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -160,7 +169,9 @@ bsr_find_row_offsets(uint32_t row_count, const T* d_nnz, const BsrRowCol* unique
     row_offsets[row] = lower;
 }
 
-__global__ void bsr_set_column(const int* d_nnz, const BsrRowCol* unique_row_cols, int* bsr_cols)
+__global__ void bsr_set_column(
+    const int* WP_RESTRICT d_nnz, const BsrRowCol* WP_RESTRICT unique_row_cols, int* WP_RESTRICT bsr_cols
+)
 {
     const uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= *d_nnz)
@@ -193,10 +204,10 @@ void launch_bsr_fill_triplet_key_values(
 __global__ void bsr_transpose_fill_row_col(
     const int nnz_upper_bound,
     const int row_count,
-    const int* bsr_offsets,
-    const int* bsr_columns,
-    int* block_indices,
-    BsrRowCol* transposed_row_col
+    const int* WP_RESTRICT bsr_offsets,
+    const int* WP_RESTRICT bsr_columns,
+    int* WP_RESTRICT block_indices,
+    BsrRowCol* WP_RESTRICT transposed_row_col
 )
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
