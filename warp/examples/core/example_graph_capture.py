@@ -57,10 +57,17 @@ class Example:
         self.frequency = 1.0
         self.amplitude = 1.0
 
-        # use graph capture to reduce per-kernel launch overhead
-        with wp.ScopedCapture() as capture:
-            self.fbm()
-        self.graph = capture.graph
+        # Use graph capture to reduce per-kernel launch overhead. ScopedCapture
+        # transparently no-ops on HIP (ROCm 7.x graph capture is unsupported);
+        # in that case capture.graph is None and we fall back to direct launches.
+        self.use_cuda_graph = wp.get_device().is_cuda
+        self.graph = None
+        if self.use_cuda_graph:
+            with wp.ScopedCapture() as capture:
+                self.fbm()
+            self.graph = capture.graph
+            if self.graph is None:
+                self.use_cuda_graph = False
 
     def fbm(self):
         for _ in range(16):
@@ -81,7 +88,12 @@ class Example:
         with wp.ScopedTimer("step", active=True):
             wp.launch(kernel=slide, dim=self.width, inputs=[self.x, self.shift])
 
-            wp.capture_launch(self.graph)
+            if self.use_cuda_graph:
+                wp.capture_launch(self.graph)
+            else:
+                # Direct launch fallback (CPU, or HIP where graph capture is
+                # not yet supported in ROCm 7.x).
+                self.fbm()
 
     def step_and_render(self, frame_num=None, img=None):
         self.step()
