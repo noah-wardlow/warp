@@ -31,6 +31,34 @@ from .xla_ffi import *
 
 _wp_module_name_ = "warp.jax_experimental.ffi"
 
+
+# JAX FFI registration helper. Warp kernels invoked through XLA need to be
+# registered against every backend platform on which they may run; on a build
+# that targets HIP devices we additionally register the same capsule against
+# JAX's "ROCM" platform tag (and the lowercase variant some JAX versions use)
+# so that XLA-on-AMD finds the kernel.
+def _is_rocm():
+    try:
+        return any(d.is_hip for d in wp.get_cuda_devices())
+    except Exception:
+        return False
+
+
+def _register_ffi_target(name, ffi_capsule):
+    platforms = ["CUDA"]
+    if _is_rocm():
+        platforms.extend(["ROCM", "rocm"])
+    for platform in platforms:
+        try:
+            jax.ffi.register_ffi_target(name, ffi_capsule, platform=platform)
+        except Exception:
+            continue
+
+
+# Type alias for differentiable kernel cache key
+DiffKernelCacheKey = tuple[Callable, tuple, int, str, tuple[str, ...]]
+
+
 # Holders for the custom callbacks to keep them alive.
 _FFI_KERNEL_REGISTRY: dict[tuple, FfiKernel] = {}
 _FFI_DIFF_KERNEL_REGISTRY: dict[tuple, Callable] = {}
@@ -70,14 +98,14 @@ def compute_batch_size(shape, batch_ndim):
 
 
 class GraphMode(IntEnum):
-    """CUDA graph capture modes for :func:`warp.jax_experimental.jax_callable`.
+    """GPU graph capture modes for :func:`warp.jax_experimental.jax_callable`.
 
-    These modes control whether JAX or Warp captures a CUDA graph, and whether
+    These modes control whether JAX or Warp captures a GPU graph, and whether
     staging buffers are used when capturing with Warp.
     """
 
     NONE = 0
-    """Disable graph capture. Use when operations are not CUDA-graph compatible (for example, host synchronization)."""
+    """Disable graph capture. Use when operations are not GPU-graph compatible (for example, host synchronization)."""
     JAX = 1
     """Let JAX capture the graph so the callable can be used as a subgraph within a larger JAX capture."""
     WARP = 2
@@ -215,7 +243,7 @@ class FfiKernel:
         self.callback_func = FFI_CCALLFUNC(self.ffi_callback)
         ffi_ccall_address = ctypes.cast(self.callback_func, ctypes.c_void_p)
         ffi_capsule = jax.ffi.pycapsule(ffi_ccall_address.value)
-        jax.ffi.register_ffi_target(self.name, ffi_capsule, platform="CUDA")
+        _register_ffi_target(self.name, ffi_capsule)
 
     def __call__(self, *args, output_dims=None, launch_dims=None, vmap_method=None):
         num_inputs = len(args)
@@ -316,7 +344,7 @@ class FfiKernel:
                 except Exception:
                     # ignore unsupported devices like TPUs
                     pass
-                # we only support CUDA devices for now
+                # we only support GPU devices for now
                 if dev.is_cuda:
                     self.kernel.module.load(dev)
 
@@ -341,7 +369,7 @@ class FfiKernel:
                     metadata_ext = ctypes.cast(extension, ctypes.POINTER(XLA_FFI_Metadata_Extension))
                     metadata_ext.contents.metadata.contents.api_version.major_version = 0
                     metadata_ext.contents.metadata.contents.api_version.minor_version = 1
-                    # Turn on CUDA graphs for this handler.
+                    # Turn on GPU graphs for this handler.
                     metadata_ext.contents.metadata.contents.traits = (
                         XLA_FFI_Handler_TraitsBits.COMMAND_BUFFER_COMPATIBLE
                     )
@@ -599,7 +627,7 @@ class FfiCallable:
         self.callback_func = FFI_CCALLFUNC(self.ffi_callback)
         ffi_ccall_address = ctypes.cast(self.callback_func, ctypes.c_void_p)
         ffi_capsule = jax.ffi.pycapsule(ffi_ccall_address.value)
-        jax.ffi.register_ffi_target(self.name, ffi_capsule, platform="CUDA")
+        _register_ffi_target(self.name, ffi_capsule)
 
     def __call__(self, *args, output_dims=None, vmap_method=None):
         num_inputs = len(args)
@@ -690,7 +718,7 @@ class FfiCallable:
                 except Exception:
                     # ignore unsupported devices like TPUs
                     pass
-                # we only support CUDA devices for now
+                # we only support GPU devices for now
                 if dev.is_cuda:
                     module.load(dev)
 
@@ -712,7 +740,7 @@ class FfiCallable:
                     metadata_ext = ctypes.cast(extension, ctypes.POINTER(XLA_FFI_Metadata_Extension))
                     metadata_ext.contents.metadata.contents.api_version.major_version = 0
                     metadata_ext.contents.metadata.contents.api_version.minor_version = 1
-                    # Turn on CUDA graphs for this handler.
+                    # Turn on GPU graphs for this handler.
                     if self.graph_mode is GraphMode.JAX:
                         metadata_ext.contents.metadata.contents.traits = (
                             XLA_FFI_Handler_TraitsBits.COMMAND_BUFFER_COMPATIBLE
@@ -1175,7 +1203,7 @@ def jax_kernel(
         - Scalars must be static arguments in JAX.
         - Input and input-output arguments must precede the output arguments in the ``kernel`` definition.
         - There must be at least one output or input-output argument.
-        - Only the CUDA backend is supported.
+        - Only the CUDA/ROCm GPU backends are supported.
     """
 
     check_jax_version()
@@ -1493,7 +1521,7 @@ def jax_callable(
         func: The Python function to call.
         num_outputs: Specify the number of output arguments if greater than 1.
             This must include the number of ``in_out_arguments``.
-        graph_mode: CUDA graph capture mode.
+        graph_mode: GPU graph capture mode.
             ``GraphMode.JAX`` (default): Let JAX capture the graph, which may be used as a subgraph in an enclosing JAX capture.
             ``GraphMode.WARP``: Let Warp capture the graph. Use this mode when the callable cannot be used as a subgraph,
             such as when the callable uses conditional graph nodes.
@@ -1522,7 +1550,7 @@ def jax_callable(
         - Scalars must be static arguments in JAX.
         - Input and input-output arguments must precede the output arguments in the ``func`` definition.
         - There must be at least one output or input-output argument.
-        - Only the CUDA backend is supported.
+        - Only the CUDA/ROCm GPU backends are supported.
     """
 
     check_jax_version()
@@ -1616,7 +1644,7 @@ def register_ffi_callback(name: str, func: Callable, graph_compatible: bool = Tr
     Args:
         name: A unique FFI callback name.
         func: The Python function to call.
-        graph_compatible: Whether the function can be called during CUDA graph capture.
+        graph_compatible: Whether the function can be called during GPU graph capture.
     """
 
     check_jax_version()
@@ -1636,7 +1664,7 @@ def register_ffi_callback(name: str, func: Callable, graph_compatible: bool = Tr
                     metadata_ext.contents.metadata.contents.api_version.major_version = 0
                     metadata_ext.contents.metadata.contents.api_version.minor_version = 1
                     if graph_compatible:
-                        # Turn on CUDA graphs for this handler.
+                        # Turn on GPU graphs for this handler.
                         metadata_ext.contents.metadata.contents.traits = (
                             XLA_FFI_Handler_TraitsBits.COMMAND_BUFFER_COMPATIBLE
                         )
@@ -1673,7 +1701,7 @@ def register_ffi_callback(name: str, func: Callable, graph_compatible: bool = Tr
         _FFI_CALLBACK_REGISTRY[name] = callback_func
     ffi_ccall_address = ctypes.cast(callback_func, ctypes.c_void_p)
     ffi_capsule = jax.ffi.pycapsule(ffi_ccall_address.value)
-    jax.ffi.register_ffi_target(name, ffi_capsule, platform="CUDA")
+    _register_ffi_target(name, ffi_capsule)
 
 
 ###############################################################################

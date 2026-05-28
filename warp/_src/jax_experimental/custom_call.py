@@ -45,7 +45,7 @@ def jax_kernel(kernel, launch_dims=None, quiet=False):
         - All kernel arguments must be contiguous arrays.
         - Input arguments are followed by output arguments in the Warp kernel definition.
         - There must be at least one input argument and at least one output argument.
-        - Only the CUDA backend is supported.
+        - Only the CUDA/ROCm GPU backends are supported.
     """
     import jax  # noqa: PLC0415
 
