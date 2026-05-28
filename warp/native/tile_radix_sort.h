@@ -17,7 +17,12 @@ namespace wp {
 // After this threshold, using segmented_sort from cub is faster
 // The threshold must be a power of 2
 // The radix sort in this file is consistently slower than the bitonic sort
+// On HIP/gfx9x targets, the bitonic path can exceed per-kernel local/LDS limits
+#if defined(__HIP_DEVICE_COMPILE__)
+#define BITONIC_SORT_THRESHOLD 512
+#else
 #define BITONIC_SORT_THRESHOLD 2048
+#endif
 
 struct UintKeyToUint {
     inline CUDA_CALLABLE uint32_t convert(uint32 value) { return value; }
@@ -83,7 +88,7 @@ constexpr inline CUDA_CALLABLE int next_higher_pow2(int input)
 }
 
 
-#if defined(__CUDA_ARCH__)
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 
 
 // Bitonic sort fast pass for small arrays
@@ -151,8 +156,8 @@ inline CUDA_CALLABLE void bitonic_sort_single_stage_full_thread_block(
 template <typename K, typename V>
 inline CUDA_CALLABLE void bitonic_sort_single_stage_full_warp(int k, unsigned int thread_id, int stride, K& key, V& val)
 {
-    auto s_key = __shfl_xor_sync(0xFFFFFFFFu, key, stride);
-    auto s_val = __shfl_xor_sync(0xFFFFFFFFu, val, stride);
+    auto s_key = __shfl_xor_sync(tile_full_mask, key, stride);
+    auto s_val = __shfl_xor_sync(tile_full_mask, val, stride);
     auto swap = (((thread_id & stride) != 0 ? key > s_key : key < s_key)) ^ ((thread_id & k) == 0);
     key = swap ? s_key : key;
     val = swap ? s_val : val;
@@ -164,7 +169,7 @@ template <typename K, typename V>
 inline CUDA_CALLABLE void bitonic_sort_single_warp(unsigned int thread_id, K& key, V& val)
 {
 #pragma unroll
-    for (int k = 2; k <= 32; k <<= 1) {
+    for (int k = 2; k <= WP_TILE_WARP_SIZE; k <<= 1) {
 #pragma unroll
         for (int stride = k / 2; stride > 0; stride >>= 1) {
             bitonic_sort_single_stage_full_warp(k, thread_id, stride, key, val);
@@ -286,9 +291,9 @@ template <int max_num_elements, typename K, typename V, typename KeyToUint>
 inline CUDA_CALLABLE void
 bitonic_sort_thread_block_shared_mem(int thread_id, K* keys_input, V* values_input, int num_elements_to_sort)
 {
-    if constexpr (max_num_elements < 32) {
+    if constexpr (max_num_elements < WP_TILE_WARP_SIZE) {
         // Fast track - single warp sort
-        if (thread_id < 32)
+        if (thread_id < WP_TILE_WARP_SIZE)
             bitonic_sort_single_warp<K, V, KeyToUint>(thread_id, keys_input, values_input, num_elements_to_sort);
         __syncthreads();
     } else {
@@ -385,9 +390,9 @@ template <int max_num_elements, typename K, typename V, typename KeyToUint>
 inline CUDA_CALLABLE void
 bitonic_sort_thread_block_direct(int thread_id, K* keys_input, V* values_input, int num_elements_to_sort)
 {
-    if constexpr (max_num_elements < 32) {
+    if constexpr (max_num_elements < WP_TILE_WARP_SIZE) {
         // Fast track - single warp sort
-        if (thread_id < 32)
+        if (thread_id < WP_TILE_WARP_SIZE)
             bitonic_sort_single_warp<K, V, KeyToUint>(thread_id, keys_input, values_input, num_elements_to_sort);
         __syncthreads();
     } else {
@@ -454,13 +459,15 @@ bitonic_sort_thread_block_direct(int thread_id, uint64_t* keys_input, V* values_
 
 // End bitonic sort
 
-inline CUDA_CALLABLE int warp_scan_inclusive(int lane, unsigned int ballot_mask)
+inline CUDA_CALLABLE int warp_scan_inclusive(int lane, tile_mask_t ballot_mask)
 {
-    uint32_t mask = ((1u << (lane + 1)) - 1);
-    return __popc(ballot_mask & mask);
+    constexpr int mask_bits = int(sizeof(tile_mask_t) * 8);
+    // Avoid undefined behavior for top lane (e.g. lane 63 on wave64).
+    tile_mask_t mask = (lane + 1 >= mask_bits) ? tile_mask_t(-1) : ((tile_mask_t(1) << (lane + 1)) - 1);
+    return tile_popc(ballot_mask & mask);
 }
 
-inline CUDA_CALLABLE int warp_scan_inclusive(int lane, unsigned int mask, bool thread_contributes_element)
+inline CUDA_CALLABLE int warp_scan_inclusive(int lane, tile_mask_t mask, bool thread_contributes_element)
 {
     return warp_scan_inclusive(lane, __ballot_sync(mask, thread_contributes_element));
 }
@@ -469,8 +476,8 @@ template <typename T> inline CUDA_CALLABLE T warp_scan_inclusive(int lane, T val
 {
 // Computes an inclusive cumulative sum
 #pragma unroll
-    for (int i = 1; i <= 32; i *= 2) {
-        auto n = __shfl_up_sync(0xffffffffu, value, i, 32);
+    for (int i = 1; i < WP_TILE_WARP_SIZE; i *= 2) {
+        auto n = __shfl_up_sync(tile_full_mask, value, i, WP_TILE_WARP_SIZE);
 
         if (lane >= i)
             value = value + n;
@@ -493,8 +500,8 @@ inline CUDA_CALLABLE void radix_sort_thread_block_core(
 
     int num_bits_to_sort = 32;  // Sort all bits because that's what the bitonic fast pass does as well
 
-    const int warp_id = thread_id / 32;
-    const int lane_id = thread_id & 31;
+    const int warp_id = thread_id / WP_TILE_WARP_SIZE;
+    const int lane_id = thread_id % WP_TILE_WARP_SIZE;
 
     const int bits_per_pass
         = 4;  // Higher than 5 is currently not supported - 2^5=32 is the warp size and is still just fine
@@ -528,9 +535,9 @@ inline CUDA_CALLABLE void radix_sort_thread_block_core(
 
             for (int b = 0; b < num_scan_buckets; b++) {
                 bool contributes = digit == b;
-                int sum_per_warp = warp_scan_inclusive(lane_id, 0xFFFFFFFF, contributes);
+                int sum_per_warp = warp_scan_inclusive(lane_id, tile_full_mask, contributes);
 
-                if (lane_id == 31)
+                if (lane_id == (WP_TILE_WARP_SIZE - 1))
                     shared_mem[warp_id][b] = sum_per_warp;
             }
             __syncthreads();
@@ -538,7 +545,7 @@ inline CUDA_CALLABLE void radix_sort_thread_block_core(
             for (int b = warp_id; b < num_warp_passes * num_warps; b += num_warps) {
                 int f = lane_id < num_warps ? shared_mem[lane_id][b] : 0;
                 f = warp_scan_inclusive(lane_id, f);
-                if (lane_id == 31)
+                if (lane_id == (WP_TILE_WARP_SIZE - 1))
                     buckets[b] += f;
             }
             __syncthreads();
@@ -609,8 +616,8 @@ inline CUDA_CALLABLE void radix_sort_thread_block_core(
 
             for (int b = 0; b < num_scan_buckets; b++) {
                 bool contributes = digit == b;
-                int sum_per_warp = warp_scan_inclusive(lane_id, 0xFFFFFFFF, contributes);
-                if (lane_id == 31)
+                int sum_per_warp = warp_scan_inclusive(lane_id, tile_full_mask, contributes);
+                if (lane_id == (WP_TILE_WARP_SIZE - 1))
                     shared_mem[warp_id][b] = sum_per_warp;
 
                 if (contributes)
@@ -625,12 +632,12 @@ inline CUDA_CALLABLE void radix_sort_thread_block_core(
 
                 int f = lane_id < num_warps ? shared_mem[lane_id][b] : 0;
                 int inclusive_scan = warp_scan_inclusive(lane_id, f);
-                if (lane_id == 31 && warp_id == 0) {
+                if (lane_id == (WP_TILE_WARP_SIZE - 1) && warp_id == 0) {
                     buckets2[b] += inclusive_scan;
                 }
 
                 int warp_offset = __shfl_sync(
-                    0xFFFFFFFF, inclusive_scan - f, warp_id
+                    tile_full_mask, inclusive_scan - f, warp_id, WP_TILE_WARP_SIZE
                 );  //-f because warp_offset needs to be an exclusive scan
 
                 bool contributes = digit == b;
@@ -975,7 +982,7 @@ radix_sort_pairs_cpu(float* keys_input, float* keys_aux, V* values_input, V* val
 }
 
 
-template <typename TileK, typename TileV> void tile_sort(TileK& t, TileV& t2)
+template <typename TileK, typename TileV> inline CUDA_CALLABLE void tile_sort(TileK& t, TileV& t2)
 {
     using T = typename TileK::Type;
     using V = typename TileV::Type;
@@ -1000,7 +1007,7 @@ template <typename TileK, typename TileV> void tile_sort(TileK& t, TileV& t2)
     WP_TILE_SYNC();
 }
 
-template <typename TileK, typename TileV> void tile_sort(TileK& t, TileV& t2, int start, int length)
+template <typename TileK, typename TileV> inline CUDA_CALLABLE void tile_sort(TileK& t, TileV& t2, int start, int length)
 {
     using T = typename TileK::Type;
     using V = typename TileV::Type;
@@ -1031,13 +1038,13 @@ template <typename TileK, typename TileV> void tile_sort(TileK& t, TileV& t2, in
 #endif  // !defined(__CUDA_ARCH__)
 
 
-template <typename TileK, typename TileV> inline void adj_tile_sort(TileK& t, TileV& t2, TileK& adj_t1, TileV& adj_t2)
+template <typename TileK, typename TileV> inline CUDA_CALLABLE void adj_tile_sort(TileK& t, TileV& t2, TileK& adj_t1, TileV& adj_t2)
 {
     // todo: general purpose sort gradients not implemented
 }
 
 template <typename TileK, typename TileV>
-inline void
+inline CUDA_CALLABLE void
 adj_tile_sort(TileK& t, TileV& t2, int start, int length, TileK& adj_t1, TileV& adj_t2, int adj_start, int adj_length)
 {
     // todo: general purpose sort gradients not implemented
