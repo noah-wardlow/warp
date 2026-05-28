@@ -10,7 +10,7 @@ from warp.tests.unittest_utils import *
 
 
 def test_pinned(test: unittest.TestCase, device):
-    assert wp.get_device(device).is_cuda, "Test device must be a CUDA device"
+    assert wp.get_device(device).is_cuda, "Test device must be a GPU device"
 
     n = 1024 * 1024
 

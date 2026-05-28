@@ -444,7 +444,14 @@ add_function_test(TestMesh, "test_mesh_query_point", test_mesh_query_point, devi
 add_function_test(TestMesh, "test_mesh_query_ray", test_mesh_query_ray, devices=devices)
 add_function_test(TestMesh, "test_grouped_mesh_query_ray", test_grouped_mesh_query_ray, devices=devices)
 add_function_test(TestMesh, "test_mesh_refit", test_mesh_refit, devices=devices)
-add_function_test(TestMesh, "test_mesh_refit_graph", test_mesh_refit_graph, devices=get_selected_cuda_test_devices())
+# Mesh refit-during-graph-capture: HIP graph capture is unsupported in ROCm 7.x,
+# so the graph variant of the test only runs on CUDA devices.
+add_function_test(
+    TestMesh,
+    "test_mesh_refit_graph",
+    test_mesh_refit_graph,
+    devices=[d for d in get_selected_cuda_test_devices() if not d.is_hip],
+)
 add_function_test(TestMesh, "test_mesh_exceptions", test_mesh_exceptions, devices=get_selected_cuda_test_devices())
 
 

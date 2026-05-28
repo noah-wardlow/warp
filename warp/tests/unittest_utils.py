@@ -42,7 +42,7 @@ except OSError:
 
 
 def get_selected_cuda_test_devices(mode: str | None = None):
-    """Returns a list of CUDA devices according the selected ``mode`` behavior.
+    """Returns a list of GPU devices (CUDA or HIP) according the selected ``mode`` behavior.
 
     If ``mode`` is ``None``, the ``global test_mode`` value will be used and
     this list will be a subset of the devices returned from ``get_test_devices()``.
@@ -50,9 +50,9 @@ def get_selected_cuda_test_devices(mode: str | None = None):
     Args:
         mode: ``"basic"``, returns a list containing up to a single CUDA device.
           ``"unique"``, returns a list containing no more than one device of
-          every CUDA architecture on the system.
+          every GPU architecture on the system.
           ``"unique_or_2x"`` behaves like ``"unique"`` but adds up to one
-          additional CUDA device if the system only devices of a single CUDA
+          additional GPU device if the system only devices of a single GPU
           architecture.
     """
 
@@ -69,8 +69,9 @@ def get_selected_cuda_test_devices(mode: str | None = None):
     first_cuda_devices = {}
 
     for d in cuda_devices:
-        if d.arch not in first_cuda_devices:
-            first_cuda_devices[d.arch] = d
+        arch_key = d.arch_str or d.arch
+        if arch_key not in first_cuda_devices:
+            first_cuda_devices[arch_key] = d
 
     selected_cuda_devices = list(first_cuda_devices.values())
 
@@ -89,10 +90,10 @@ def get_test_devices(mode: str | None = None):
     Args:
         mode: The testing mode to specify which devices to include. If not provided or ``None``, the
           ``global test_mode`` value will be used.
-          "basic": Returns the CPU and the first GPU device when available.
+          "basic": Returns the CPU and the first GPU devices when available.
           "unique": Returns the CPU and all unique GPU architectures.
-          "unique_or_2x" (default): Behaves like "unique" but adds up to one additional CUDA device
-            if the system only devices of a single CUDA architecture.
+        "unique_or_2x" (default): Behaves like "unique" but adds up to one additional GPU device
+          if the system only devices of a single CUDA architecture.
           "all": Returns all available devices.
     """
     if mode is None:

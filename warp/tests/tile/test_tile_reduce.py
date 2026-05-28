@@ -619,6 +619,15 @@ def tile_reduce_axis_tier2_sum_axis2_kernel(x: wp.array3d(dtype=float), y: wp.ar
     wp.tile_store(y, b)
 
 
+# HIP variant: smaller non-reduction dims to fit AMD's 64 KiB shared memory limit
+# (8*8*128*4*2 = 65536 + overhead exceeds limit; 4*4*128 fits easily)
+@wp.kernel
+def tile_reduce_axis_tier2_sum_axis2_kernel_hip(x: wp.array3d(dtype=float), y: wp.array2d(dtype=float)):
+    a = wp.tile_load(x, shape=(4, 4, 128), storage="shared")
+    b = wp.tile_sum(a, axis=2)
+    wp.tile_store(y, b)
+
+
 # Tier 3: axis size > 256
 @wp.kernel
 def tile_reduce_axis_tier3_sum_axis0_kernel(x: wp.array2d(dtype=float), y: wp.array(dtype=float)):
@@ -729,12 +738,15 @@ def test_tile_reduce_axis_tier2(test, device, block_dim=TILE_DIM):
     assert_np_equal(y.numpy(), np.prod(x_np, axis=1), tol=1e-2)
 
     # 3D sum: axis=2, size 128 (forward and backward)
-    x = wp.ones((8, 8, 128), dtype=float, requires_grad=True, device=device)
-    y = wp.zeros((8, 8), dtype=float, requires_grad=True, device=device)
+    # HIP: use smaller non-reduction dims (4x4) to fit AMD's 64 KiB shared memory limit
+    d0d1 = 4 if wp.get_device(device).is_hip else 8
+    kernel_3d = tile_reduce_axis_tier2_sum_axis2_kernel_hip if wp.get_device(device).is_hip else tile_reduce_axis_tier2_sum_axis2_kernel
+    x = wp.ones((d0d1, d0d1, 128), dtype=float, requires_grad=True, device=device)
+    y = wp.zeros((d0d1, d0d1), dtype=float, requires_grad=True, device=device)
 
     with wp.Tape() as tape:
         wp.launch_tiled(
-            tile_reduce_axis_tier2_sum_axis2_kernel,
+            kernel_3d,
             dim=[1],
             inputs=[x],
             outputs=[y],
@@ -745,8 +757,8 @@ def test_tile_reduce_axis_tier2(test, device, block_dim=TILE_DIM):
     y.grad = wp.ones_like(y)
     tape.backward()
 
-    assert_np_equal(y.numpy(), np.ones((8, 8), dtype=float) * 128.0)
-    assert_np_equal(x.grad.numpy(), np.ones((8, 8, 128), dtype=float))
+    assert_np_equal(y.numpy(), np.ones((d0d1, d0d1), dtype=float) * 128.0)
+    assert_np_equal(x.grad.numpy(), np.ones((d0d1, d0d1, 128), dtype=float))
 
 
 def test_tile_reduce_axis_tier3(test, device, block_dim=TILE_DIM):

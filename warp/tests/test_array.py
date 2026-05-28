@@ -3895,6 +3895,7 @@ def test_graph_fill_vecmat(test, device):
 
 devices = get_test_devices()
 cuda_devices = get_cuda_test_devices()
+cuda_graph_devices = [d for d in cuda_devices if not d.is_hip]
 
 
 class TestArray(unittest.TestCase):
@@ -4041,7 +4042,7 @@ add_function_test(TestArray, "test_array2d_slicing", test_array2d_slicing, devic
 add_function_test(TestArray, "test_array3d_slicing", test_array3d_slicing, devices=devices)
 add_function_test(TestArray, "test_array4d_slicing", test_array4d_slicing, devices=devices)
 
-add_function_test(TestArray, "test_graph_fill_vecmat", test_graph_fill_vecmat, devices=cuda_devices)
+add_function_test(TestArray, "test_graph_fill_vecmat", test_graph_fill_vecmat, devices=cuda_graph_devices)
 
 try:
     import torch

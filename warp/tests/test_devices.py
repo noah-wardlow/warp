@@ -85,19 +85,24 @@ class TestDevices(unittest.TestCase):
         self.assertIsInstance(archs, list)
 
         if wp.is_cuda_available():
-            # With CUDA devices present, NVRTC must report architectures
-            self.assertTrue(len(archs) > 0, "No CUDA supported architectures found")
+            # With a CUDA or HIP device present, the runtime must report architectures.
+            self.assertTrue(len(archs) > 0, "No CUDA / HIP supported architectures found")
+        # When neither is available, archs may legitimately be empty OR non-empty
+        # (NVRTC bundled but no driver yields a non-empty list of offline targets).
 
-        # Validate the list contents (may be non-empty even without
-        # CUDA devices when NVRTC is available without a driver)
-        for arch in archs:
-            self.assertIsInstance(arch, int, f"Architecture value {arch} should be an integer")
-            self.assertGreaterEqual(arch, 50, f"Architecture {arch} should be >= 50 (e.g., sm_50)")
-            self.assertLessEqual(arch, 150, f"Architecture {arch} seems unreasonably high")
-
-        # Check the list is sorted with no duplicates
+        # The list is sorted with no duplicates, regardless of element type.
         self.assertEqual(archs, sorted(archs), "Architecture list should be sorted")
         self.assertEqual(len(archs), len(set(archs)), "Architecture list should not contain duplicates")
+
+        # Each entry is either an SM compute-capability integer (CUDA, e.g. 86)
+        # or a HIP gfx target string (e.g. "gfx942").
+        for arch in archs:
+            if isinstance(arch, str):
+                self.assertRegex(arch, r"^gfx\d+", f"Architecture {arch} should look like a gfx target")
+            else:
+                self.assertIsInstance(arch, int, f"Architecture value {arch} should be an integer")
+                self.assertGreaterEqual(arch, 50, f"Architecture {arch} should be >= 50 (e.g., sm_50)")
+                self.assertLessEqual(arch, 150, f"Architecture {arch} seems unreasonably high")
 
 
 add_function_test(

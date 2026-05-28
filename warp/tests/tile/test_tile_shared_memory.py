@@ -45,9 +45,10 @@ def test_tile_shared_mem_size(test, device):
 
 # checks that we can configure shared memory > 48kb default
 def test_tile_shared_mem_large(test, device):
-    # set dimensions that require 64kb for the forward kernel
+    # Set dimensions that require large dynamic shared memory for the forward kernel.
+    # On HIP, keep total group segment (static + dynamic) within 64KB.
     DIM_M = 64
-    DIM_N = 128
+    DIM_N = 126 if wp.get_device(device).is_hip else 128
 
     BLOCK_DIM = 256
 
@@ -71,7 +72,9 @@ def test_tile_shared_mem_large(test, device):
     expected_forward_bytes = DIM_M * DIM_N * 4 * 2
     expected_backward_bytes = 0
 
-    assert expected_forward_bytes == 2**16
+    assert expected_forward_bytes > (48 * 1024)
+    if not wp.get_device(device).is_hip:
+        assert expected_forward_bytes == 2**16
 
     # check shared memory for kernel on the device
     module_exec = compute.module.load(device, BLOCK_DIM)
@@ -123,7 +126,7 @@ def test_tile_shared_mem_graph(test, device):
 
 # checks that stack allocations work for user functions
 def test_tile_shared_mem_func(test, device):
-    DIM_M = 64
+    DIM_M = 63 if wp.get_device(device).is_hip else 64
     DIM_N = 64
 
     SMALL_DIM_M = 64 // 4
@@ -161,7 +164,7 @@ def test_tile_shared_mem_func(test, device):
     hooks = module_exec.get_kernel_hooks(compute)
 
     # ensure that total required dynamic shared is the larger of the two tiles
-    expected_required_shared = 64 * 64 * 4 * 2
+    expected_required_shared = DIM_M * DIM_N * 4 * 2
 
     assert hooks.forward_smem_bytes == expected_required_shared
     assert hooks.backward_smem_bytes == expected_required_shared * 2
@@ -811,6 +814,7 @@ def test_tile_scatter_masked_grad_cross_thread(test, device):
 
 
 devices = get_cuda_test_devices()
+graph_devices = [d for d in devices if not d.is_hip]
 
 
 class TestTileSharedMemory(unittest.TestCase):
@@ -823,7 +827,7 @@ add_function_test(
 add_function_test(
     TestTileSharedMemory, "test_tile_shared_mem_large", test_tile_shared_mem_large, devices=devices, check_output=False
 )
-add_function_test(TestTileSharedMemory, "test_tile_shared_mem_graph", test_tile_shared_mem_graph, devices=devices)
+add_function_test(TestTileSharedMemory, "test_tile_shared_mem_graph", test_tile_shared_mem_graph, devices=graph_devices)
 add_function_test(TestTileSharedMemory, "test_tile_shared_mem_func", test_tile_shared_mem_func, devices=devices)
 add_function_test(TestTileSharedMemory, "test_tile_shared_non_aligned", test_tile_shared_non_aligned, devices=devices)
 add_function_test(

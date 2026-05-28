@@ -1,14 +1,19 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for 1D, 2D, and 3D texture functionality on both CPU and CUDA devices."""
+"""Unit tests for 1D, 2D, and 3D texture functionality on CPU and CUDA devices.
+
+HIP devices are filtered out at registration time because the HIP build of
+the native runtime uses a fallback texture path (texture sampling returns
+zero, see warp/native/texture.h) so these tests are not meaningful there.
+"""
 
 import unittest
 
 import numpy as np
 
 import warp as wp
-from warp.tests.unittest_utils import add_function_test, get_selected_cuda_test_devices, get_test_devices
+from warp.tests.unittest_utils import add_function_test, get_test_devices
 
 # ============================================================================
 # 1D Texture Kernels
@@ -2087,7 +2092,7 @@ def test_texture2d_mirror_linear_edge(test, device):
 
     result_edge = output.numpy()[0]
     # With correct MIRROR: result should be close to 3.0 but may interpolate with mirrored neighbor
-    # The key is it should match CUDA behavior
+    # The key is it should match CUDA/HIP behavior
     test.assertGreater(result_edge, 2.0, f"MIRROR mode result unexpected: got {result_edge}")
 
 
@@ -2609,11 +2614,10 @@ class TestTexture(unittest.TestCase):
     pass
 
 
-# Register tests - textures work on both CPU and CUDA devices
-cuda_devices = get_selected_cuda_test_devices()
-all_devices = get_test_devices()
+# Register tests - skip HIP devices for texture tests
+all_devices = [d for d in get_test_devices() if not d.is_hip]
 
-# Core texture tests - run on all devices (CPU + CUDA)
+# Core texture tests - run on every non-HIP device (CPU + CUDA).
 add_function_test(TestTexture, "test_texture1d_1channel", test_texture1d_1channel, devices=all_devices)
 add_function_test(TestTexture, "test_texture1d_2channel", test_texture1d_2channel, devices=all_devices)
 add_function_test(TestTexture, "test_texture1d_4channel", test_texture1d_4channel, devices=all_devices)

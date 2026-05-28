@@ -790,7 +790,9 @@ def test_gradient_slice_3d_1d(test, device):
                 [0, 0, 0],
             ],
         ]
-        assert_np_equal(a.grad.numpy(), np.array(expected_grad))
+        # Use tolerance to accommodate FP differences on HIP where pow(x, 2.0)
+        # goes through exp2(2*log2(x)) instead of being optimized to x*x.
+        assert_np_equal(a.grad.numpy(), np.array(expected_grad), tol=1e-4)
 
 
 def test_gradient_slice_3d_2d(test, device):
@@ -855,7 +857,7 @@ add_function_test(TestGrad, "test_for_loop_nested_for_grad", test_for_loop_neste
 add_function_test(TestGrad, "test_scalar_grad", test_scalar_grad, devices=devices)
 add_function_test(TestGrad, "test_for_loop_grad", test_for_loop_grad, devices=devices)
 add_function_test(
-    TestGrad, "test_for_loop_graph_grad", test_for_loop_graph_grad, devices=get_selected_cuda_test_devices()
+    TestGrad, "test_for_loop_graph_grad", test_for_loop_graph_grad, devices=[d for d in get_selected_cuda_test_devices() if not d.is_hip]
 )
 add_function_test(TestGrad, "test_for_loop_nested_if_grad", test_for_loop_nested_if_grad, devices=devices)
 add_function_test(TestGrad, "test_preserve_outputs_grad", test_preserve_outputs_grad, devices=devices)

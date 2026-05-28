@@ -11,7 +11,7 @@ from warp.tests.unittest_utils import *
 TILE_DIM = 64
 TILE_M = 16
 TILE_N = 32
-TILE_O = 8
+TILE_O = 7 if any(d.is_hip for d in wp.get_cuda_devices()) else 8
 
 
 @wp.kernel

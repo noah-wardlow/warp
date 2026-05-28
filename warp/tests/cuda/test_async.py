@@ -25,7 +25,7 @@ class Capturable:
     def __exit__(self, exc_type, exc_value, traceback):
         if self.use_graph:
             try:
-                # need to call capture_end() to terminate the CUDA stream capture
+                # need to call capture_end() to terminate the stream capture
                 graph = wp.capture_end(stream=self.stream)
             except Exception:
                 # capture_end() will raise if there was an error during capture, but we squash it here
@@ -159,16 +159,16 @@ class TestAsync(unittest.TestCase):
     pass
 
 
-# get all CUDA devices
+# get all CUDA devices (CUDA or HIP backend)
 cuda_devices = wp.get_cuda_devices()
 
-# get CUDA devices that support mempools
+# get GPU devices that support mempools
 cuda_devices_with_mempools = []
 for d in cuda_devices:
     if d.is_mempool_supported:
         cuda_devices_with_mempools.append(d)
 
-# get a pair of CUDA devices that support mempool access
+# get a pair of GPU devices that support mempool access
 cuda_devices_with_mempool_access = []
 for target_device in cuda_devices_with_mempools:
     for peer_device in cuda_devices_with_mempools:
@@ -178,6 +178,10 @@ for target_device in cuda_devices_with_mempools:
                 break
     if cuda_devices_with_mempool_access:
         break
+
+
+def _graph_supported_for_devices(devices):
+    return all(d.is_cuda and not d.is_hip for d in devices)
 
 
 def add_test_variants(
@@ -200,10 +204,12 @@ def add_test_variants(
         name2 = f"{func.__name__}_DefaultAlloc_WithGraph"
         if device_count == 1:
             add_function_test(TestAsync, name1, func1, devices=devices)
-            add_function_test(TestAsync, name2, func2, devices=devices)
+            if _graph_supported_for_devices(devices):
+                add_function_test(TestAsync, name2, func2, devices=devices)
         else:
             add_function_test(TestAsync, name1, func1)
-            add_function_test(TestAsync, name2, func2)
+            if _graph_supported_for_devices(devices):
+                add_function_test(TestAsync, name2, func2)
 
     # test that works with mempool allocators
     if device_count <= len(cuda_devices_with_mempools):
@@ -231,10 +237,11 @@ def add_test_variants(
             return func(t, *devices, True, True)
 
         name4 = f"{func.__name__}_MempoolAlloc_WithGraph"
-        if device_count == 1:
-            add_function_test(TestAsync, name4, func4, devices=devices)
-        else:
-            add_function_test(TestAsync, name4, func4)
+        if _graph_supported_for_devices(devices):
+            if device_count == 1:
+                add_function_test(TestAsync, name4, func4, devices=devices)
+            else:
+                add_function_test(TestAsync, name4, func4)
 
 
 add_test_variants(test_async_empty, graph_allocs=True)
@@ -563,8 +570,11 @@ for src_type, src_ctor in array_constructors.items():
             else:
                 grad_flags = [False]
 
-            # graph capture options (only supported with CUDA devices)
-            if src_device.is_cuda or dst_device.is_cuda:
+            # graph capture options (CUDA-only, not supported on HIP)
+            graph_supported = (
+                (src_device.is_cuda and not src_device.is_hip) or (dst_device.is_cuda and not dst_device.is_hip)
+            )
+            if graph_supported:
                 graph_flags = [False, True]
             else:
                 graph_flags = [False]

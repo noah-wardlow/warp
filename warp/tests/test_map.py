@@ -580,6 +580,7 @@ def test_cache_broadcasting(test, device):
 
 devices = get_test_devices("basic")
 cuda_test_devices = get_cuda_test_devices()
+cuda_graph_devices = [d for d in cuda_test_devices if not d.is_hip]
 
 
 class TestMap(unittest.TestCase):
@@ -598,7 +599,7 @@ add_function_test(TestMap, "test_broadcasting", test_broadcasting, devices=devic
 add_function_test(TestMap, "test_input_validity", test_input_validity, devices=devices)
 add_function_test(TestMap, "test_output_validity", test_output_validity, devices=devices)
 add_function_test(TestMap, "test_kernel_creation", test_kernel_creation, devices=devices)
-add_function_test(TestMap, "test_graph_capture", test_graph_capture, devices=cuda_test_devices)
+add_function_test(TestMap, "test_graph_capture", test_graph_capture, devices=cuda_graph_devices)
 add_function_test(TestMap, "test_renamed_warp_module", test_renamed_warp_module, devices=devices)
 add_function_test(TestMap, "test_cache_same_types_shapes", test_cache_same_types_shapes, devices=devices)
 add_function_test(TestMap, "test_cache_different_shapes", test_cache_different_shapes, devices=devices)

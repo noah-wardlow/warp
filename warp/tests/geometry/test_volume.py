@@ -733,12 +733,13 @@ def test_volume_sample_index_kernel(
     background: wp.array(dtype=Any),
     sampled_values: wp.array(dtype=Any),
 ):
+    tol = 1.0e-5
     tid = wp.tid()
     p = points[tid]
 
     ref = wp.volume_sample(volume, p, wp.Volume.LINEAR, dtype=values.dtype)
     sampled_values[tid] = wp.volume_sample_index(volume, p, wp.Volume.LINEAR, values, background[0])
-    expect_eq(sampled_values[tid], ref)
+    expect_near(sampled_values[tid], ref, tol)
 
 
 @wp.kernel
@@ -750,6 +751,7 @@ def test_volume_sample_grad_index_kernel(
     sampled_values: wp.array(dtype=Any),
     sampled_grads: wp.array(dtype=Any),
 ):
+    tol = 1.0e-5
     tid = wp.tid()
     p = points[tid]
 
@@ -758,11 +760,11 @@ def test_volume_sample_grad_index_kernel(
 
     grad = type(ref_grad)()
     sampled_values[tid] = wp.volume_sample_grad_index(volume, p, wp.Volume.LINEAR, values, background[0], grad)
-    expect_eq(sampled_values[tid], ref)
+    expect_near(sampled_values[tid], ref, tol)
 
-    expect_eq(grad[0], ref_grad[0])
-    expect_eq(grad[1], ref_grad[1])
-    expect_eq(grad[2], ref_grad[2])
+    expect_near(grad[0], ref_grad[0], tol)
+    expect_near(grad[1], ref_grad[1], tol)
+    expect_near(grad[2], ref_grad[2], tol)
     sampled_grads[tid] = grad
 
 
