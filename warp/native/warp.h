@@ -408,7 +408,7 @@ WP_API void wp_nvrtc_supported_archs(int* archs);
 WP_API int wp_cuda_device_get_count();
 WP_API void* wp_cuda_device_get_primary_context(int ordinal);
 WP_API const char* wp_cuda_device_get_name(int ordinal);
-WP_API int wp_cuda_device_get_arch(int ordinal);
+WP_API const char* wp_cuda_device_get_arch(int ordinal);
 WP_API int wp_cuda_device_get_sm_count(int ordinal);
 WP_API int wp_cuda_device_get_max_shared_memory(int ordinal);
 WP_API void wp_cuda_device_get_uuid(int ordinal, char uuid[16]);
@@ -508,7 +508,7 @@ WP_API bool wp_cuda_graph_update_memcpy_batch(
 WP_API size_t wp_cuda_compile_program(
     const char* cuda_src,
     const char* program_name,
-    int arch,
+    const char* arch,
     const char* arch_suffix,
     const char* include_dir,
     int num_cuda_include_dirs,
