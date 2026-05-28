@@ -154,7 +154,16 @@ corresponding tests:
 | GLTextureResource                | Disabled                        | OpenGL/HIP interop is not wired up |
 | Texture sampling (1D/2D/3D)      | Returns zero                    | HIP image support is off on CDNA3 |
 | `libmathdx` (cuBLASDx/cuFFTDx/cuSOLVERDx) | Disabled               | NVIDIA-only library |
-| Tile FFT (`tile_fft`)            | `NotImplementedError`           | Needs rocFFT integration (out of scope for this milestone) |
+| `tile_matmul`, `tile_cholesky`, `tile_diag_solve`, `tile_lu_solve`, `tile_qr_solve` | `NotImplementedError` | Bind through cuBLASDx / cuSOLVERDx (libmathdx); deferred until a rocBLAS/rocSOLVER tile path lands |
+| `tile_fft`                       | `NotImplementedError`           | Binds through cuFFTDx (libmathdx); needs a rocFFT tile path |
+
+The remaining tile primitives — `tile_load`, `tile_store`, `tile_view`, `tile_arange`,
+`tile_broadcast`, `tile_reduce`, `tile_scan`, `tile_sort`, `tile_atomic_add`, and the
+`tile_bvh` / `tile_mesh` queries — *are* supported on HIP. The HIP build widens
+`tile_mask_t` to 64 bits to match the AMD warp size, swaps `WP_TILE_SHARED_ARRAY` to a
+raw-byte representation (works around HIPRTC's refusal of `__shared__` arrays of
+non-trivial types), and applies `__attribute__((optnone))` on `tile_atomic_add` to
+defeat a HIPRTC-clang miscompile.
 
 If you need any of these, please file an issue against this fork — most are *deferred*, not
 *rejected*, and will follow once the core port is stable on `v1.13.0`.
