@@ -278,6 +278,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Path to CUDA Toolkit installation (auto-detected via WARP_CUDA_PATH, CUDA_HOME, CUDA_PATH, or nvcc)",
     )
     group_toolchain.add_argument(
+        "--rocm-path",
+        type=str,
+        help="Path to ROCm installation (auto-detected via ROCM_PATH, ROCM_HOME, hipcc, or /opt/rocm)",
+    )
+    group_toolchain.add_argument(
         "--libmathdx-path",
         type=str,
         help="Path to NVIDIA libmathdx installation (optional if LIBMATHDX_HOME is set)",
@@ -302,6 +307,16 @@ def main(argv: list[str] | None = None) -> int:
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Build with NVIDIA libmathdx (includes cuBLASDx/cuFFTDx/cuSOLVERDx) for tile operations: matrix multiplication, FFT, and linear solvers",
+    )
+    group_build.add_argument(
+        "--hip-arch",
+        type=str,
+        help=(
+            "AMD GPU target architecture(s) for the HIP build "
+            "(comma- or semicolon-separated, e.g. 'gfx942,gfx950'). "
+            f"Defaults to {','.join(build_dll.DEFAULT_HIP_ARCHES)} "
+            "when --rocm-path is set or ROCm is autodetected."
+        ),
     )
     group_build.add_argument(
         "--verify-fp",
@@ -423,6 +438,25 @@ def main(argv: list[str] | None = None) -> int:
         else:
             args.libmathdx_path = None
 
+    # setup ROCm / HIP path. macOS has no ROCm support and we don't want stale
+    # env vars enabling it accidentally.
+    if platform.system() == "Darwin":
+        args.rocm_path = None
+        args.enable_hip = False
+    else:
+        if not args.rocm_path:
+            args.rocm_path = build_dll.find_rocm_sdk()
+        if args.rocm_path and not os.path.isdir(args.rocm_path):
+            print(f"Warp build error: ROCm path does not exist: {args.rocm_path}")
+            return 1
+        args.enable_hip = bool(args.rocm_path)
+        if args.enable_hip and platform.system() == "Windows":
+            print("Warp build error: HIP build is not supported on Windows.")
+            return 1
+        if args.enable_hip:
+            print(f"ROCm detected at {args.rocm_path}; HIP build enabled "
+                  f"(--hip-arch={','.join(build_dll._parse_hip_arches(args))})")
+
     # Validate libmathdx path (from any source: CLI, environment, or Packman)
     if args.libmathdx_path:
         if not validate_libmathdx_path(args.libmathdx_path):
@@ -485,9 +519,27 @@ def main(argv: list[str] | None = None) -> int:
             "native/mathdx.cpp",
             "native/coloring.cpp",
         ]
+        # The HIP backend deliberately omits a handful of CUDA-only sources:
+        #   - apic.cpp / alloc_tracker.cpp: depend on cuMemPool* APIs that
+        #     have no HIP equivalent in ROCm 7.x; APIC/RMM are deferred for
+        #     the HIP port.
+        #   - mathdx.cpp: pulls in NVIDIA cuBLASDx/cuFFTDx/cuSOLVERDx headers.
+        #   - texture.cpp: depends on cuArray / cuTexObject which are
+        #     unsupported on AMD CDNA (image support disabled by HIPRTC).
+        if args.enable_hip:
+            hip_skipped = {
+                "native/apic.cpp",
+                "native/alloc_tracker.cpp",
+                "native/mathdx.cpp",
+                "native/texture.cpp",
+            }
+            if args.verbose:
+                for skipped in sorted(hip_skipped):
+                    print(f"HIP build: skipping CUDA-only source {skipped}")
+            cpp_sources = [s for s in cpp_sources if s not in hip_skipped]
         warp_cpp_paths = [os.path.join(build_path, cpp) for cpp in cpp_sources]
 
-        if args.cuda_path is None:
+        if args.cuda_path is None and not args.enable_hip:
             if args.cuda:
                 print("Warning: CUDA toolchain not found, building without CUDA support")
             warp_cu_paths = None
@@ -507,8 +559,15 @@ def main(argv: list[str] | None = None) -> int:
             ]
             warp_cu_paths = [os.path.join(build_path, cu) for cu in cuda_sources]
 
-            # libmathdx is only needed when building with CUDA
-            if args.use_libmathdx and args.libmathdx_path is None:
+            # libmathdx is only needed when building with CUDA. The HIP build
+            # already disabled use_libmathdx in the build_dll layer; replicate
+            # the relaxed check here so we don't fail before getting there.
+            if (
+                args.cuda_path
+                and not args.enable_hip
+                and args.use_libmathdx
+                and args.libmathdx_path is None
+            ):
                 print("Error: libmathdx not found. MathDx support is enabled but libmathdx could not be located.")
                 print("  Either:")
                 print("    - Install libmathdx and set LIBMATHDX_HOME environment variable")

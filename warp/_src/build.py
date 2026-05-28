@@ -71,10 +71,21 @@ def build_cuda(
         # isolated between threads and processes to avoid .pch races.
         pch_dir_bytes = pch_dir.encode("utf-8") if pch_dir else None
         arch_suffix_bytes = arch_suffix.encode("utf-8")
+        # CUDA archs come in as integers (e.g. 86 for sm_86). HIP archs come in
+        # as strings (e.g. "gfx942"). The native side accepts either form via
+        # a const char* parameter, so we normalize here.
+        if arch is None:
+            arch_bytes = None
+        elif isinstance(arch, int):
+            arch_bytes = f"sm_{arch}".encode("utf-8")
+        elif isinstance(arch, str):
+            arch_bytes = arch.encode("utf-8")
+        else:
+            raise TypeError(f"Unsupported arch type: {type(arch)}")
         err = warp._src.context.runtime.core.wp_cuda_compile_program(
             src,
             program_name_bytes,
-            arch,
+            arch_bytes,
             arch_suffix_bytes,
             inc_path,
             0,
@@ -572,7 +583,10 @@ def build_lto_solver(
                 max_smem_bytes = 232448
                 max_smem_is_estimate = True
                 for d in warp.get_cuda_devices():
-                    if d.arch == arch:
+                    matches = (isinstance(arch, str) and getattr(d, "arch_str", None) == arch) or (
+                        isinstance(arch, int) and d.arch == arch
+                    )
+                    if matches:
                         max_smem_bytes = d.max_shared_memory_per_block
                         max_smem_is_estimate = False
                         break
