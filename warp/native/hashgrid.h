@@ -9,11 +9,11 @@ namespace wp {
 // point_ids is at a consistent offset regardless of Type. This allows
 // hash_grid_point_id to work without knowing the grid's scalar type.
 template <typename Type> struct HashGrid_t {
-    int* point_cells { nullptr };  // cell id of a point
-    int* point_ids { nullptr };  // index to original point
+    int* WP_RESTRICT point_cells { nullptr };  // cell id of a point
+    int* WP_RESTRICT point_ids { nullptr };  // index to original point
 
-    int* cell_starts { nullptr };  // start index of a range of indices belonging to a cell, dim_x*dim_y*dim_z in length
-    int* cell_ends { nullptr };  // end index of a range of indices belonging to a cell, dim_x*dim_y*dim_z in length
+    int* WP_RESTRICT cell_starts { nullptr };  // start index of a range of indices belonging to a cell, dim_x*dim_y*dim_z in length
+    int* WP_RESTRICT cell_ends { nullptr };  // end index of a range of indices belonging to a cell, dim_x*dim_y*dim_z in length
 
     int dim_x;
     int dim_y;

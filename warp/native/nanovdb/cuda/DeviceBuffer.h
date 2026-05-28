@@ -17,7 +17,11 @@
 #ifndef NANOVDB_CUDA_DEVICEBUFFER_H_HAS_BEEN_INCLUDED
 #define NANOVDB_CUDA_DEVICEBUFFER_H_HAS_BEEN_INCLUDED
 
+#if defined(__HIP_PLATFORM_AMD__)
+#include "hip_util.h"
+#else
 #include <cuda.h>
+#endif
 #include <memory>// for std::shared_ptr
 #include <nanovdb/HostBuffer.h>// for BufferTraits
 #include <nanovdb/util/cuda/Util.h>// for cudaMalloc/cudaMallocManaged/cudaFree
@@ -361,7 +365,7 @@ inline void DeviceBuffer::deviceUpload(int device, cudaStream_t stream, bool syn
 inline void DeviceBuffer::deviceUpload(cudaStream_t stream, bool sync)
 {
     int device = 0;
-    cudaGetDevice(&device);
+    cudaCheck(cudaGetDevice(&device));
     this->deviceUpload(device, stream, sync);
 } // DeviceBuffer::deviceUpload
 

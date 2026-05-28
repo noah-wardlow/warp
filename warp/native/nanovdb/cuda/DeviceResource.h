@@ -4,7 +4,11 @@
 #ifndef NANOVDB_CUDA_DEVICERESOURCE_H_HAS_BEEN_INCLUDED
 #define NANOVDB_CUDA_DEVICERESOURCE_H_HAS_BEEN_INCLUDED
 
+#if defined(__HIP_PLATFORM_AMD__)
+#include "hip_util.h"
+#else
 #include <cuda_runtime_api.h>
+#endif
 #include <nanovdb/util/cuda/Util.h>
 
 namespace nanovdb {

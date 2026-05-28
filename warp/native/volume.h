@@ -11,15 +11,16 @@
 #define PNANOVDB_MEMCPY_CUSTOM
 #define pnanovdb_memcpy memcpy
 
-#if defined(WP_NO_CRT) && (!defined(__CUDACC__) || (defined(__clang__) && defined(__CUDA__)))
+#if defined(WP_NO_CRT) && (!defined(__CUDACC__) || (defined(__clang__) && defined(__CUDA__))) && !defined(__HIPCC__)
 // PNanoVDB will try to include <stdint.h> unless __CUDACC_RTC__ is defined.
 // Clang CUDA JIT also lacks stdint.h since it doesn't use the full CUDA Toolkit headers.
+// HIPRTC follows NVRTC's convention of providing stdint.h, so we exclude it.
 #define __CUDACC_RTC__
 #endif
 
 #include "nanovdb/PNanoVDB.h"
 
-#if defined(WP_NO_CRT) && (!defined(__CUDACC__) || (defined(__clang__) && defined(__CUDA__)))
+#if defined(WP_NO_CRT) && (!defined(__CUDACC__) || (defined(__clang__) && defined(__CUDA__))) && !defined(__HIPCC__)
 #undef __CUDACC_RTC__
 #endif
 
@@ -228,7 +229,7 @@ template <typename T> struct index_value_accessor : value_accessor_base {
     pnanovdb_grid_type_t grid_type;
     array_t<T> data;
     const T& background;
-    T* adj_background;
+    T* WP_RESTRICT adj_background;
 
     explicit inline CUDA_CALLABLE index_value_accessor(
         const pnanovdb_buf_t buf, const array_t<T>& data, const T& background, T* adj_background = nullptr

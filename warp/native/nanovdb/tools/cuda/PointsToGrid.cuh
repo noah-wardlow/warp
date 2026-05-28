@@ -15,7 +15,12 @@
 #ifndef NANOVDB_TOOLS_CUDA_POINTSTOGRID_CUH_HAS_BEEN_INCLUDED
 #define NANOVDB_TOOLS_CUDA_POINTSTOGRID_CUH_HAS_BEEN_INCLUDED
 
+#if defined(__HIP_PLATFORM_AMD__)
+#include <hipcub/hipcub.hpp>
+namespace cub = hipcub;
+#else
 #include <cub/cub.cuh>
+#endif
 #include <thrust/iterator/transform_iterator.h>
 #include <vector>
 #include <tuple>
@@ -515,7 +520,7 @@ PointsToGrid<BuildT, ResourceT>::getHandle(const PtrT points,
     tools::cuda::updateChecksum((GridData*)buffer.deviceData(), mChecksum, mStream);
     if (mVerbose==1) mTimer.stop();
 
-    cudaStreamSynchronize(mStream);
+    cudaCheck(cudaStreamSynchronize(mStream));
 
     return GridHandle<BufferT>(std::move(buffer));
 }// PointsToGrid<BuildT, ResourceT>::getHandle
@@ -766,7 +771,7 @@ inline BufferT PointsToGrid<BuildT, ResourceT>::getBuffer(const PtrT, size_t poi
     mData.size  = mData.blind + pointCount*sizeofPoint();// end of buffer
 
     int device = 0;
-    cudaGetDevice(&device);
+    cudaCheck(cudaGetDevice(&device));
     auto buffer = BufferT::create(mData.size, &pool, device, mStream);// only allocate buffer on the device
 
     mData.d_bufferPtr = buffer.deviceData();
