@@ -10,7 +10,11 @@ import unittest
 import numpy as np
 
 import warp as wp
-from warp.tests.unittest_utils import add_function_test, get_cuda_test_devices, get_test_devices
+from warp.tests.unittest_utils import (
+    add_function_test,
+    get_cuda_test_devices,
+    get_graph_capture_test_devices,
+)
 
 
 @wp.kernel
@@ -539,7 +543,9 @@ def test_get_param_ptr(test, device):
         plain_capture.graph.get_param_ptr("a")
 
 
-devices = get_test_devices()
+# APIC capture/save/load requires native graph capture, which is not yet
+# supported on HIP/ROCm (see Device.supports_graph_capture).
+devices = get_graph_capture_test_devices()
 
 add_function_test(TestApic, "test_save_apic_false_error", test_save_apic_false_error, devices=devices)
 add_function_test(TestApic, "test_save_single_kernel", test_save_single_kernel, devices=devices)
@@ -556,8 +562,11 @@ add_function_test(TestApic, "test_graph_execution_unchanged", test_graph_executi
 add_function_test(TestApic, "test_save_load_with_param_update", test_save_load_with_param_update, devices=devices)
 add_function_test(TestApic, "test_save_load_memcpy_and_kernel", test_save_load_memcpy_and_kernel, devices=devices)
 add_function_test(
-    TestApic, "test_save_load_fill", test_save_load_fill, devices=get_cuda_test_devices()
-)  # CPU: wp_memtile_host not recorded
+    TestApic,
+    "test_save_load_fill",
+    test_save_load_fill,
+    devices=[d for d in get_cuda_test_devices() if d.supports_graph_capture],
+)  # CPU: wp_memtile_host not recorded; HIP: no native graph capture
 add_function_test(TestApic, "test_save_load_alloc_only", test_save_load_alloc_only, devices=devices)
 add_function_test(TestApic, "test_get_param_ptr", test_get_param_ptr, devices=devices)
 

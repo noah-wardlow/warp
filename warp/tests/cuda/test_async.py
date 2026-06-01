@@ -181,7 +181,7 @@ for target_device in cuda_devices_with_mempools:
 
 
 def _graph_supported_for_devices(devices):
-    return all(d.is_cuda and not d.is_hip for d in devices)
+    return all(d.supports_graph_capture for d in devices)
 
 
 def add_test_variants(

@@ -222,9 +222,11 @@ def query_ray_group_kernel(
 
 def test_mesh_query_ray(test, device):
     if device.is_cpu:
-        constructors = ["sah", "median", "cubql"]
+        constructors = ["sah", "median"]
     else:
-        constructors = ["sah", "median", "lbvh", "cubql"]
+        constructors = ["sah", "median", "lbvh"]
+    if device.supports_cubql:
+        constructors.append("cubql")
 
     leaf_sizes = [1, 2, 4]
 
@@ -314,9 +316,11 @@ def query_ray_hit_kernel(
 
 def test_mesh_refit(test, device):
     if device.is_cpu:
-        constructors = ["sah", "median", "cubql"]
+        constructors = ["sah", "median"]
     else:
-        constructors = ["sah", "median", "lbvh", "cubql"]
+        constructors = ["sah", "median", "lbvh"]
+    if device.supports_cubql:
+        constructors.append("cubql")
 
     # Ray aimed at the origin — hits the unit cube centered there
     origin = wp.vec3(0.0, 5.0, 0.0)
@@ -409,18 +413,28 @@ def test_mesh_exceptions(test, device):
         indices = indices.reshape((3, -1))
         wp.Mesh(points=points, indices=indices)
 
-    # grouped queries are not supported with cuBQL backend
-    with test.assertRaises(RuntimeError):
-        points = wp.array(POINT_POSITIONS, dtype=wp.vec3, device=device)
-        indices = wp.array(RIGHT_HANDED_FACE_VERTEX_INDICES, dtype=int, device=device)
-        groups = wp.zeros(FACE_COUNT, dtype=int, device=device)
-        wp.Mesh(points=points, indices=indices, groups=groups, bvh_constructor="cubql")
+    # The remaining cuBQL-specific negative checks require a device that
+    # actually supports the cuBQL backend (cuBQL has no HIP port and is also
+    # absent from builds compiled with WP_DISABLE_CUBQL).
+    if device.supports_cubql:
+        # grouped queries are not supported with cuBQL backend
+        with test.assertRaises(RuntimeError):
+            points = wp.array(POINT_POSITIONS, dtype=wp.vec3, device=device)
+            indices = wp.array(RIGHT_HANDED_FACE_VERTEX_INDICES, dtype=int, device=device)
+            groups = wp.zeros(FACE_COUNT, dtype=int, device=device)
+            wp.Mesh(points=points, indices=indices, groups=groups, bvh_constructor="cubql")
 
-    # winding number support is not available with cuBQL backend
-    with test.assertRaises(RuntimeError):
-        points = wp.array(POINT_POSITIONS, dtype=wp.vec3, device=device)
-        indices = wp.array(RIGHT_HANDED_FACE_VERTEX_INDICES, dtype=int, device=device)
-        wp.Mesh(points=points, indices=indices, support_winding_number=True, bvh_constructor="cubql")
+        # winding number support is not available with cuBQL backend
+        with test.assertRaises(RuntimeError):
+            points = wp.array(POINT_POSITIONS, dtype=wp.vec3, device=device)
+            indices = wp.array(RIGHT_HANDED_FACE_VERTEX_INDICES, dtype=int, device=device)
+            wp.Mesh(points=points, indices=indices, support_winding_number=True, bvh_constructor="cubql")
+    else:
+        # On devices that don't support cuBQL the constructor itself must raise.
+        with test.assertRaises(RuntimeError):
+            points = wp.array(POINT_POSITIONS, dtype=wp.vec3, device=device)
+            indices = wp.array(RIGHT_HANDED_FACE_VERTEX_INDICES, dtype=int, device=device)
+            wp.Mesh(points=points, indices=indices, bvh_constructor="cubql")
 
     # unknown bvh_constructor string raises ValueError
     with test.assertRaises(ValueError):
@@ -444,7 +458,12 @@ add_function_test(TestMesh, "test_mesh_query_point", test_mesh_query_point, devi
 add_function_test(TestMesh, "test_mesh_query_ray", test_mesh_query_ray, devices=devices)
 add_function_test(TestMesh, "test_grouped_mesh_query_ray", test_grouped_mesh_query_ray, devices=devices)
 add_function_test(TestMesh, "test_mesh_refit", test_mesh_refit, devices=devices)
-add_function_test(TestMesh, "test_mesh_refit_graph", test_mesh_refit_graph, devices=[d for d in get_selected_cuda_test_devices() if not d.is_hip])
+add_function_test(
+    TestMesh,
+    "test_mesh_refit_graph",
+    test_mesh_refit_graph,
+    devices=[d for d in get_selected_cuda_test_devices() if d.supports_graph_capture],
+)
 add_function_test(TestMesh, "test_mesh_exceptions", test_mesh_exceptions, devices=get_selected_cuda_test_devices())
 
 

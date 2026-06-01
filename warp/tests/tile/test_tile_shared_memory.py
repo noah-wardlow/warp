@@ -814,7 +814,7 @@ def test_tile_scatter_masked_grad_cross_thread(test, device):
 
 
 devices = get_cuda_test_devices()
-graph_devices = [d for d in devices if not d.is_hip]
+graph_devices = [d for d in devices if d.supports_graph_capture]
 
 
 class TestTileSharedMemory(unittest.TestCase):

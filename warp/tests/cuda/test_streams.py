@@ -545,7 +545,7 @@ def test_synchronize_during_capture(test, device):
 
 
 devices = get_selected_cuda_test_devices()
-graph_devices = [d for d in devices if not d.is_hip]
+graph_devices = [d for d in devices if d.supports_graph_capture]
 
 
 class TestStreams(unittest.TestCase):
@@ -712,7 +712,9 @@ add_function_test(TestStreams, "test_event_external", test_event_external, devic
 add_function_test(TestStreams, "test_graph_destroy_during_capture", test_graph_destroy_during_capture, devices=graph_devices)
 
 add_function_test(TestStreams, "test_stream_synchronize_cpu", test_stream_synchronize_cpu, devices=None)
-add_function_test(TestStreams, "test_synchronize_during_capture", test_synchronize_during_capture, devices=devices)
+add_function_test(
+    TestStreams, "test_synchronize_during_capture", test_synchronize_during_capture, devices=graph_devices
+)
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -15,7 +15,7 @@ import unittest
 import numpy as np
 
 import warp as wp
-from warp.tests.unittest_utils import add_function_test, get_test_devices
+from warp.tests.unittest_utils import add_function_test, get_graph_capture_test_devices
 
 
 def create_unit_cube_mesh(device):
@@ -563,7 +563,9 @@ class TestApicMesh(unittest.TestCase):
     pass
 
 
-devices = get_test_devices()
+# APIC capture/save/load requires native graph capture, which is not yet
+# supported on HIP/ROCm (see Device.supports_graph_capture).
+devices = get_graph_capture_test_devices()
 
 add_function_test(TestApicMesh, "test_apic_mesh_query_point", test_apic_mesh_query_point, devices=devices)
 add_function_test(TestApicMesh, "test_apic_mesh_query_ray", test_apic_mesh_query_ray, devices=devices)

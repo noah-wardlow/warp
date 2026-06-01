@@ -1059,7 +1059,7 @@ try:
             TestTorch, "test_tensor_in_warp_kernel", test_tensor_in_warp_kernel, devices=torch_compatible_devices
         )
 
-    torch_graph_devices = [d for d in torch_compatible_cuda_devices if not d.is_hip]
+    torch_graph_devices = [d for d in torch_compatible_cuda_devices if d.supports_graph_capture]
     if torch_graph_devices:
         add_function_test(
             TestTorch,

@@ -796,7 +796,7 @@ def test_bsr_alloc(test, device):
 
 devices = get_test_devices()
 cuda_test_devices = get_selected_cuda_test_devices()
-cuda_graph_devices = [d for d in cuda_test_devices if not d.is_hip]
+cuda_graph_devices = [d for d in cuda_test_devices if d.supports_graph_capture]
 
 
 class TestSparse(unittest.TestCase):

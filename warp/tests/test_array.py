@@ -3895,7 +3895,7 @@ def test_graph_fill_vecmat(test, device):
 
 devices = get_test_devices()
 cuda_devices = get_cuda_test_devices()
-cuda_graph_devices = [d for d in cuda_devices if not d.is_hip]
+cuda_graph_devices = [d for d in cuda_devices if d.supports_graph_capture]
 
 
 class TestArray(unittest.TestCase):

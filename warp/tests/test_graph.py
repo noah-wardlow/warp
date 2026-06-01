@@ -8,7 +8,7 @@ import unittest
 import numpy as np
 
 import warp as wp
-from warp.tests.unittest_utils import add_function_test, get_test_devices
+from warp.tests.unittest_utils import add_function_test, get_graph_capture_test_devices
 
 
 @wp.kernel
@@ -158,7 +158,7 @@ def test_graph_alloc(test, device):
     np.testing.assert_allclose(output_arr.numpy(), expected)
 
 
-devices = get_test_devices()
+devices = get_graph_capture_test_devices()
 
 add_function_test(TestGraph, "test_graph_single_kernel", test_graph_single_kernel, devices=devices)
 add_function_test(TestGraph, "test_graph_multiple_kernels", test_graph_multiple_kernels, devices=devices)

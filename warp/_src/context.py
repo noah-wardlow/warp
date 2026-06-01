@@ -3967,6 +3967,41 @@ class Device:
             return False
 
     @property
+    def supports_graph_capture(self) -> bool:
+        """A boolean indicating whether native graph capture is supported on this device.
+
+        Returns ``True`` for CPU (always recordable via APIC) and CUDA devices.
+        Returns ``False`` for HIP/ROCm devices: hipGraph is not yet mature in
+        Warp's runtime (mempool pointer remapping bugs, event timing inside
+        graphs, etc.), so :func:`capture_begin` / :class:`ScopedCapture` are
+        no-ops on HIP and :func:`capture_save` is unavailable for HIP-targeted
+        graphs.
+        """
+        if self.is_hip:
+            return False
+        return True
+
+    @property
+    def supports_cubql(self) -> bool:
+        """A boolean indicating whether the cuBQL BVH backend is usable on this device.
+
+        Returns ``True`` for CPU devices (cuBQL has a CPU builder) and for non-HIP
+        CUDA devices when the native library was compiled with cuBQL support.
+        Returns ``False`` for HIP/ROCm devices: cuBQL has no HIP port, so the
+        device-side cuBQL entry points compile to no-op stubs and constructing a
+        :class:`~warp._src.types.Mesh` with ``bvh_constructor="cubql"`` would
+        otherwise produce a handle whose internal pointers are NULL (causing a
+        GPU memory access fault on the first query).
+        """
+        if self.is_hip:
+            return False
+        if self.is_cpu:
+            # CPU cuBQL builder is always available when the host library is
+            # compiled with cuBQL support.
+            return is_cubql_available()
+        return is_cubql_available()
+
+    @property
     def context(self):
         """The context associated with the device."""
         if self._context is not None:
@@ -9418,7 +9453,10 @@ def capture_begin(
 
     # HIP/ROCm graph capture is not yet mature (mempool pointer remapping bugs,
     # event timing inside graphs, etc.). Disable until hipGraph stabilizes.
-    if device.is_hip:
+    # See ``Device.supports_graph_capture`` -- callers (notably
+    # :class:`ScopedCapture`) treat a ``False`` return as "capture disabled" and
+    # skip the matching :func:`capture_end`.
+    if not device.supports_graph_capture:
         return False
 
     # Create APIC recording state if requested
@@ -9903,6 +9941,17 @@ def capture_launch(graph: Graph, stream: Stream | None = None):
         graph: A :class:`Graph` as returned by :func:`~warp.capture_end()`
         stream: A :class:`Stream` to launch the graph on (CUDA only)
     """
+
+    if graph is None:
+        # ScopedCapture leaves ``graph=None`` when ``capture_begin`` returned
+        # False (currently only on HIP, where graph capture is unsupported;
+        # see ``Device.supports_graph_capture``).
+        raise RuntimeError(
+            "capture_launch() received graph=None: capture was not started. "
+            "On HIP/ROCm, native graph capture is unsupported "
+            "(Device.supports_graph_capture is False); guard call sites or "
+            "filter test devices with get_graph_capture_test_devices()."
+        )
 
     # ---- APIC loaded graph path ----
     if graph._native_graph is not None:

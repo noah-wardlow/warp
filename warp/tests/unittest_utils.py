@@ -126,6 +126,15 @@ def get_cuda_test_devices(mode=None):
     return [d for d in devices if d.is_cuda]
 
 
+def get_graph_capture_test_devices(mode: str | None = None):
+    """Subset of :func:`get_test_devices` filtered to devices that support
+    native graph capture (CPU and non-HIP CUDA). HIP/ROCm devices are excluded
+    because :func:`warp.capture_begin` is a no-op on them; see
+    ``Device.supports_graph_capture``.
+    """
+    return [d for d in get_test_devices(mode=mode) if d.supports_graph_capture]
+
+
 class StreamCapture:
     def __init__(self, stream_name):
         self.stream_name = stream_name  # 'stdout' or 'stderr'
