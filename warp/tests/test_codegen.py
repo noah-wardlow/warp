@@ -1163,7 +1163,10 @@ def test_augassign_no_double_eval_pow_subscript(test, device):
     test.assertEqual(
         counter.numpy()[0], 1, "RHS of augmented assignment with **= on subscript was evaluated more than once"
     )
-    test.assertAlmostEqual(data.numpy()[0], 25.0)
+    # places=4: ROCm's powf(5, 2) routes through exp2/log2 and yields 25.000002,
+    # which is correct to single-precision tolerance (the test's intent is the
+    # single-evaluation check above, not bit-exact pow).
+    test.assertAlmostEqual(data.numpy()[0], 25.0, places=4)
 
 
 # Mul on vec component (v[0] *= expr)

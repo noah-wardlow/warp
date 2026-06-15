@@ -4947,39 +4947,31 @@ size_t wp_cuda_launch_kernel(
         block_dim = 256;
     }
 
-    // CUDA specs up to compute capability 9.0 says the max x-dim grid is 2**31-1, so
-    // grid_dim is fine as an int for the near future
-    int grid_dim = (dim + block_dim - 1) / block_dim;
-
-#if defined(__HIP_PLATFORM_AMD__)
-    // HIP: total work-items (grid_dim * block_dim) must not exceed 2^32-1.
-    // The kernel's grid-stride loop handles the remaining elements.
-    {
-        int hip_max_grid = (int)(0xFFFFFFFFu / (unsigned)block_dim);
-        if (grid_dim > hip_max_grid)
-            grid_dim = hip_max_grid;
-    }
-#endif
-
     if (max_blocks <= 0) {
         max_blocks = 2147483647;
     }
 
-    if (grid_dim < 0) {
-#if defined(_DEBUG)
-        fprintf(
-            stderr,
-            "Warp warning: Overflow in grid dimensions detected for %zu total elements and 256 threads "
-            "per block.\n    Setting block count to %d.\n",
-            dim, max_blocks
-        );
-#endif
-        grid_dim = max_blocks;
-    } else {
-        if (grid_dim > max_blocks) {
-            grid_dim = max_blocks;
-        }
+    // Compute the grid size in 64-bit to avoid overflow for very large launches
+    // (dim > 2**31 * block_dim). The kernel's grid-stride loop processes all
+    // `dim` elements regardless of how the grid is clamped below.
+    size_t grid_dim64 = (dim + block_dim - 1) / block_dim;
+
+    // clamp to the requested/maximum block count
+    if (grid_dim64 > (size_t)max_blocks)
+        grid_dim64 = (size_t)max_blocks;
+
+#if defined(__HIP_PLATFORM_AMD__)
+    // HIP: total work-items (grid_dim * block_dim) must not exceed 2^32-1.
+    {
+        size_t hip_max_grid = 0xFFFFFFFFu / (unsigned)block_dim;
+        if (grid_dim64 > hip_max_grid)
+            grid_dim64 = hip_max_grid;
     }
+#endif
+
+    // CUDA specs up to compute capability 9.0 cap the max x-dim grid at 2**31-1,
+    // which the clamps above guarantee, so the narrowing to int is safe.
+    int grid_dim = (int)grid_dim64;
 
     begin_cuda_range(WP_TIMING_KERNEL, stream, context, get_cuda_kernel_name(kernel));
 

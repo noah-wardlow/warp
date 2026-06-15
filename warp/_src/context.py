@@ -8727,7 +8727,18 @@ def get_suggested_block_size(kernel, device: DeviceLike = None) -> tuple[int, in
         err = runtime.get_error_string()
         raise RuntimeError(f"CUDA occupancy query failed for kernel '{kernel.key}' on device '{device}': {err}")
 
-    return (block_size.value, min_grid_size.value)
+    block_size_value = block_size.value
+
+    # HIP's occupancy query (hipModuleOccupancyMaxPotentialBlockSize) does not
+    # clamp to the kernel's __launch_bounds__ the way the CUDA driver does, so
+    # enforce the maxThreadsPerBlock limit here. Harmless on CUDA, where the
+    # returned block size already respects the bound.
+    launch_bounds = kernel.options.get("launch_bounds")
+    if launch_bounds is not None:
+        max_threads = launch_bounds if isinstance(launch_bounds, int) else launch_bounds[0]
+        block_size_value = min(block_size_value, max_threads)
+
+    return (block_size_value, min_grid_size.value)
 
 
 def synchronize():
