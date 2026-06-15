@@ -568,6 +568,8 @@ class Example:
                 self.graph = capture.graph
             finally:
                 gc.enable()
+            if self.graph is None:
+                self.use_cuda_graph = False  # Graph capture is disabled on HIP.
 
     def _compute_bc(self, t):
         """Compute time-dependent Dirichlet BC contributions at time ``t``.

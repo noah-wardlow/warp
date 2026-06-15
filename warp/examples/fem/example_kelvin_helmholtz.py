@@ -516,6 +516,8 @@ class Example:
             with wp.ScopedCapture() as capture:
                 self.simulate()
             self.graph = capture.graph
+            if self.graph is None:
+                self.use_cuda_graph = False  # Graph capture is disabled on HIP.
 
     def _state_delta(self, trial_state):
         """Evaluate the DG spatial operator: M^{-1} [volume_rhs + side_rhs]."""

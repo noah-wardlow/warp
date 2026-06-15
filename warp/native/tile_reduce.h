@@ -691,17 +691,17 @@ template <typename TileA, typename TileB> CUDA_CALLABLE auto tile_dot(TileA& a, 
     }
 
     // Phase 2: cross-thread reduction (same pattern as tile_reduce_impl)
-#if defined(__CUDA_ARCH__)
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     constexpr int warp_count = (WP_TILE_BLOCK_DIM + WP_TILE_WARP_SIZE - 1) / WP_TILE_WARP_SIZE;
     auto add_op = [](ScalarT x, ScalarT y) { return x + y; };
 
     ScalarT result {};
     if constexpr (warp_count == 1) {
-        unsigned int mask = __ballot_sync(0xFFFFFFFF, has_data);
+        tile_mask_t mask = __ballot_sync(tile_full_mask, has_data);
         if (has_data)
             result = warp_reduce(thread_sum, add_op, mask);
 
-        int first_active = __ffs(mask) - 1;
+        int first_active = tile_ffs(mask) - 1;
         if (threadIdx.x == first_active)
             output.data[0] = result;
     } else {
@@ -736,7 +736,7 @@ CUDA_CALLABLE void adj_tile_dot(TileA& a, TileB& b, AdjTileA& adj_a, AdjTileB& a
 
     auto adj_reg = adj_ret.grad_to_register();
 
-#if !defined(__CUDA_ARCH__)
+#if !defined(__CUDA_ARCH__) && !defined(__HIP_DEVICE_COMPILE__)
     ScalarT scratch = adj_reg.data[0];
 #else
     // broadcast incoming adjoint to block

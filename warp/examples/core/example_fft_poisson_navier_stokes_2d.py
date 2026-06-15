@@ -468,6 +468,8 @@ if __name__ == "__main__":
             with wp.ScopedCapture() as capture:
                 example.step()
             example.graph = capture.graph
+            if example.graph is None:
+                example.use_cuda_graph = False  # Graph capture is disabled on HIP.
 
         if args.headless:
             num_steps = args.num_steps if args.num_steps is not None else 10000

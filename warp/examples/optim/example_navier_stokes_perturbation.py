@@ -389,6 +389,8 @@ class Example:
             with wp.ScopedCapture() as capture:
                 self._spin_up_step(omega_start, omega_curr, omega_next, psi, poisson_fft)
             spin_up_graph = capture.graph
+            if spin_up_graph is None:
+                self.use_cuda_graph = False  # Graph capture is disabled on HIP.
 
         # Spin-up to omega_0
         for _ in range(spin_up_steps):
@@ -514,6 +516,8 @@ class Example:
                 )
                 self.tape.zero()
             self.graph_project_and_reset = capture.graph
+            if self.graph_forward_backward is None or self.graph_project_and_reset is None:
+                self.use_cuda_graph = False  # Graph capture is disabled on HIP.
 
     def _fft_2d(
         self,

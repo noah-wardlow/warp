@@ -2528,7 +2528,7 @@ template <typename T, unsigned... Shape> inline CUDA_CALLABLE auto tile_full(T x
 // tile initialized from a specific thread's value (broadcasts value from thread_idx to all threads)
 template <typename T, unsigned... Shape> inline CUDA_CALLABLE auto tile_from_thread(T value, int thread_idx)
 {
-#if defined(__CUDA_ARCH__)
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     assert(thread_idx >= 0 && thread_idx < blockDim.x);
 
     // Use a single shared memory element for the broadcast

@@ -147,7 +147,7 @@ class Example:
                 self.simulate()
             self.graph = capture.graph
             if self.graph is None:
-                self.use_cuda_graph = False  # Graph capture is disabled on HIP.
+                self.use_graph_capture = False  # Graph capture is disabled on HIP.
 
     def simulate(self):
         for _ in range(self.sim_substeps):
