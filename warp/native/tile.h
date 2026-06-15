@@ -7215,7 +7215,13 @@ template <typename T, int Capacity> struct tile_stack_t {
         return *this;
     }
 
-    ~tile_stack_t()
+    // Note: destructor must be CUDA_CALLABLE. Without the annotation the
+    // implicit __host__ qualifier makes HIP's clang reject every kernel that
+    // declares a tile_stack_t local (NVRTC silently accepts it). Any compiler
+    // -- HIP, NVRTC, host -- that instantiates a stack-allocated tile_stack_t
+    // implicitly references this destructor when the variable goes out of
+    // scope, so it has to match the call-site annotation.
+    inline CUDA_CALLABLE ~tile_stack_t()
     {
         // LIFO: free counter first (allocated last), then data.
         // Null-pointer guard: adjoint variables are default-constructed with
