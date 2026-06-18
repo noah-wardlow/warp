@@ -1,17 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 from __future__ import annotations
 
@@ -97,6 +85,7 @@ def dtype_to_torch(warp_dtype):
 
         dtype_to_torch.type_map = {
             warp.float16: torch.float16,
+            warp.bfloat16: torch.bfloat16,
             warp.float32: torch.float32,
             warp.float64: torch.float64,
             warp.int8: torch.int8,
@@ -123,8 +112,8 @@ def dtype_from_torch(torch_dtype):
 
     Args:
         torch_dtype: A ``torch.dtype`` that has a corresponding Warp data type.
-            Currently ``torch.bfloat16``, ``torch.complex64``, and
-            ``torch.complex128`` are not supported.
+            Currently ``torch.complex64`` and ``torch.complex128`` are not
+            supported.
 
     Raises:
         TypeError: Unable to find a corresponding Warp data type.
@@ -135,6 +124,7 @@ def dtype_from_torch(torch_dtype):
 
         dtype_from_torch.type_map = {
             torch.float16: warp.float16,
+            torch.bfloat16: warp.bfloat16,
             torch.float32: warp.float32,
             torch.float64: warp.float64,
             torch.int8: warp.int8,
@@ -144,7 +134,6 @@ def dtype_from_torch(torch_dtype):
             torch.uint8: warp.uint8,
             torch.bool: warp.bool,
             # currently unsupported by Warp
-            # torch.bfloat16:
             # torch.complex64:
             # torch.complex128:
         }
@@ -167,6 +156,7 @@ def dtype_is_compatible(torch_dtype, warp_dtype) -> bool:
             torch.float64: {warp.float64},
             torch.float32: {warp.float32},
             torch.float16: {warp.float16},
+            torch.bfloat16: {warp.bfloat16},
             # allow aliasing integer tensors as signed or unsigned integer arrays
             torch.int64: {warp.int64, warp.uint64},
             torch.int32: {warp.int32, warp.uint32},
@@ -175,7 +165,6 @@ def dtype_is_compatible(torch_dtype, warp_dtype) -> bool:
             torch.uint8: {warp.uint8, warp.int8},
             torch.bool: {warp.bool, warp.uint8, warp.int8},
             # currently unsupported by Warp
-            # torch.bfloat16:
             # torch.complex64:
             # torch.complex128:
         }
@@ -201,11 +190,12 @@ dtype_is_compatible.compatible_sets = None
 # wrap a torch tensor to a wp array, data is not copied
 def from_torch(
     t: torch.Tensor,
-    dtype: warp.DType | None = None,
+    dtype: type | None = None,
     requires_grad: bool | None = None,
     grad=None,
     return_ctype: bool = False,
     sync: bool = True,
+    retain_grad: bool = False,
 ) -> warp.array | warp._src.types.array_t:
     """Convert a Torch tensor to a Warp array without copying the data.
 
@@ -222,6 +212,7 @@ def from_torch(
           This ensures any pending PyTorch operations on the tensor are complete.
           Set to False if you know the tensor is not being modified by PyTorch.
           Default is True for correctness on AMD/HIP platforms.
+        retain_grad: Whether to preserve gradients during backward instead of zeroing after read.
 
     Returns:
         The wrapped array or array descriptor.
@@ -327,6 +318,7 @@ def from_torch(
             copy=False,
             grad=grad,
             requires_grad=requires_grad,
+            retain_grad=retain_grad,
         )
 
         # save a reference to the source tensor, otherwise it may get deallocated
@@ -355,6 +347,20 @@ def to_torch(a: warp.array, requires_grad: bool | None = None):
     # Torch does not support structured arrays
     if isinstance(a.dtype, warp._src.codegen.Struct):
         raise RuntimeError("Cannot convert structured Warp arrays to Torch.")
+
+    # bfloat16 is not representable via __array_interface__ or __cuda_array_interface__
+    # (it exposes as uint16), so use DLPack for a correct dtype round-trip.
+    # This also covers compound types (vectors/matrices) whose scalar type is bfloat16.
+    scalar_type = getattr(a.dtype, "_wp_scalar_type_", a.dtype)
+    if scalar_type is warp.bfloat16:
+        t = torch.from_dlpack(warp.to_dlpack(a))
+        t.requires_grad = requires_grad
+        if requires_grad and a.requires_grad:
+            t.grad = torch.from_dlpack(warp.to_dlpack(a.grad))
+            t.grad._warp_grad_array = a.grad
+        # prevent GC of the Warp array while the tensor is alive
+        t._warp_array = a
+        return t
 
     if a.device.is_cpu:
         # Torch has an issue wrapping CPU objects

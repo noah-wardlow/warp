@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Optional
 
 import numpy as np
 
@@ -35,14 +34,14 @@ class BsrMMFemMatrix:
         self._use_graph = use_graph
 
     def build_system(
-        self, space: fem.FunctionSpace, quadrature: Optional[int] = None, block_shape: Optional[tuple[int, int]] = None
+        self, space: fem.FunctionSpace, quadrature: int | None = None, block_shape: tuple[int, int] | None = None
     ):
         u = fem.make_trial(space)
 
         if quadrature is None:
             quadrature = fem.RegularQuadrature(u.domain, order=space.degree)
 
-        dof_size = wp.types.type_length(space.dtype)
+        dof_size = wp.types.type_size(space.dtype)
 
         self._mat = wps.bsr_zeros(
             rows_of_blocks=quadrature.total_point_count(),

@@ -1,19 +1,5 @@
-/*
- * SPDX-FileCopyrightText: Copyright (c) 2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
- * SPDX-License-Identifier: Apache-2.0
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- * http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// SPDX-FileCopyrightText: Copyright (c) 2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
 
 #include "warp.h"
 
@@ -112,7 +98,7 @@ uint64_t wp_volume_create_host(void* buf, uint64_t size, bool copy, bool owner)
     // Copy or alias buffer
     volume.size_in_bytes = size;
     if (copy) {
-        volume.buffer = wp_alloc_host(size);
+        volume.buffer = wp_alloc_host(size, "(native:volume)");
         wp_memcpy_h2h(volume.buffer, buf, size);
         volume.owner = true;
     } else {
@@ -162,7 +148,7 @@ uint64_t wp_volume_create_device(void* context, void* buf, uint64_t size, bool c
     // Copy or alias data buffer
     volume.size_in_bytes = size;
     if (copy) {
-        volume.buffer = wp_alloc_device(WP_CURRENT_CONTEXT, size);
+        volume.buffer = wp_alloc_device(WP_CURRENT_CONTEXT, size, "(native:volume)");
         wp_memcpy_d2d(WP_CURRENT_CONTEXT, volume.buffer, buf, size);
         volume.owner = true;
     } else {
@@ -172,7 +158,8 @@ uint64_t wp_volume_create_device(void* context, void* buf, uint64_t size, bool c
 
     // Make blind metadata accessible on host
     const uint64_t blindmetadata_size = volume.grid_data.blind_metadata_count * sizeof(pnanovdb_gridblindmetadata_t);
-    volume.blind_metadata = static_cast<pnanovdb_gridblindmetadata_t*>(wp_alloc_pinned(blindmetadata_size));
+    volume.blind_metadata
+        = static_cast<pnanovdb_gridblindmetadata_t*>(wp_alloc_pinned(blindmetadata_size, "(native:volume)"));
     wp_memcpy_d2h(
         WP_CURRENT_CONTEXT, volume.blind_metadata,
         static_cast<uint8_t*>(volume.buffer) + volume.grid_data.blind_metadata_offset, blindmetadata_size
@@ -508,3 +495,13 @@ void wp_volume_get_tiles_device(uint64_t id, void* buf) { }
 void wp_volume_get_voxels_device(uint64_t id, void* buf) { }
 
 #endif
+
+const char* wp_nanovdb_version()
+{
+    static char version[64];
+    snprintf(
+        version, sizeof(version), "%d.%d.%d", PNANOVDB_MAJOR_VERSION_NUMBER, PNANOVDB_MINOR_VERSION_NUMBER,
+        PNANOVDB_PATCH_VERSION_NUMBER
+    );
+    return version;
+}

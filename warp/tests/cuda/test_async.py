@@ -1,17 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 import unittest
 
@@ -193,7 +181,7 @@ for target_device in cuda_devices_with_mempools:
 
 
 def _graph_supported_for_devices(devices):
-    return all(d.is_cuda and not d.is_hip for d in devices)
+    return all(d.supports_graph_capture for d in devices)
 
 
 def add_test_variants(
@@ -680,5 +668,4 @@ for src_type, src_ctor in array_constructors.items():
 #                     value_offset=0))
 
 if __name__ == "__main__":
-    wp.clear_kernel_cache()
     unittest.main(verbosity=2)

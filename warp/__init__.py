@@ -1,17 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 """The ``warp`` package provides array types and functions for creating and manipulating
 multi-dimensional data on CPU and CUDA devices. It includes kernel and function decorators
@@ -48,7 +36,9 @@ from warp._src.types import int32 as int32
 from warp._src.types import uint32 as uint32
 from warp._src.types import int64 as int64
 from warp._src.types import uint64 as uint64
+from warp._src.types import handle as handle
 from warp._src.types import float16 as float16
+from warp._src.types import bfloat16 as bfloat16
 from warp._src.types import float32 as float32
 from warp._src.types import float64 as float64
 
@@ -156,6 +146,7 @@ from warp._src.types import array4d as array4d
 from warp._src.types import fixedarray as fixedarray
 
 from warp._src.types import tile as tile
+from warp._src.types import tile_stack as tile_stack
 
 from warp._src.types import from_ptr as from_ptr
 
@@ -186,18 +177,27 @@ from warp._src.types import Bvh as Bvh
 from warp._src.types import Mesh as Mesh
 from warp._src.types import HashGrid as HashGrid
 from warp._src.types import Volume as Volume
-from warp._src.types import Texture as Texture
-from warp._src.types import Texture2D as Texture2D
-from warp._src.types import Texture3D as Texture3D
-from warp._src.texture import TextureFilterMode as TextureFilterMode
-from warp._src.texture import TextureAddressMode as TextureAddressMode
 from warp._src.types import BvhQuery as BvhQuery
 from warp._src.types import BvhQueryTiled as BvhQueryTiled
 from warp._src.types import HashGridQuery as HashGridQuery
+from warp._src.types import HashGridQueryD as HashGridQueryD
+from warp._src.types import HashGridQueryH as HashGridQueryH
 from warp._src.types import MeshQueryAABB as MeshQueryAABB
 from warp._src.types import MeshQueryAABBTiled as MeshQueryAABBTiled
 from warp._src.types import MeshQueryPoint as MeshQueryPoint
 from warp._src.types import MeshQueryRay as MeshQueryRay
+
+
+# category: Textures
+
+from warp._src.texture import Texture as Texture
+from warp._src.texture import Texture1D as Texture1D
+from warp._src.texture import Texture2D as Texture2D
+from warp._src.texture import Texture3D as Texture3D
+from warp._src.texture import TextureResourceFlags as TextureResourceFlags
+from warp._src.texture import GLTextureResource as GLTextureResource
+from warp._src.texture import TextureFilterMode as TextureFilterMode
+from warp._src.texture import TextureAddressMode as TextureAddressMode
 
 
 # category: Runtime
@@ -205,10 +205,13 @@ from warp._src.types import MeshQueryRay as MeshQueryRay
 from warp._src.context import init as init
 
 from warp._src.context import is_cpu_available as is_cpu_available
+from warp._src.context import is_cubql_available as is_cubql_available
 from warp._src.context import is_cuda_available as is_cuda_available
 
 from warp._src.build import clear_kernel_cache as clear_kernel_cache
 from warp._src.build import clear_lto_cache as clear_lto_cache
+
+from warp._src.context import print_diagnostics as print_diagnostics
 
 
 # category: Kernel Programming
@@ -242,6 +245,7 @@ from warp._src.context import Module as Module
 
 from warp._src.context import launch as launch
 from warp._src.context import launch_tiled as launch_tiled
+from warp._src.context import get_suggested_block_size as get_suggested_block_size
 from warp._src.context import synchronize as synchronize
 
 
@@ -332,16 +336,25 @@ from warp._src.context import is_peer_access_supported as is_peer_access_support
 from warp._src.context import is_peer_access_enabled as is_peer_access_enabled
 from warp._src.context import set_peer_access_enabled as set_peer_access_enabled
 
+from warp._src.context import Allocator as Allocator
+from warp._src.context import get_device_allocator as get_device_allocator
+from warp._src.context import set_cuda_allocator as set_cuda_allocator
+from warp._src.context import set_device_allocator as set_device_allocator
+from warp._src.utils import ScopedAllocator as ScopedAllocator
 
-# category: CUDA Graph Management
+
+# category: Graph Management
 
 from warp._src.utils import ScopedCapture as ScopedCapture
 
 from warp._src.context import is_conditional_graph_supported as is_conditional_graph_supported
 
+from warp._src.context import Graph as Graph
 from warp._src.context import capture_begin as capture_begin
 from warp._src.context import capture_end as capture_end
 from warp._src.context import capture_launch as capture_launch
+from warp._src.context import capture_save as capture_save
+from warp._src.context import capture_load as capture_load
 from warp._src.context import capture_if as capture_if
 from warp._src.context import capture_while as capture_while
 from warp._src.context import capture_debug_dot_print as capture_debug_dot_print
@@ -361,6 +374,10 @@ from warp._src.utils import TimingResult as TimingResult
 from warp._src.utils import timing_begin as timing_begin
 from warp._src.utils import timing_end as timing_end
 from warp._src.utils import timing_print as timing_print
+
+
+from warp._src.utils import ScopedMemoryTracker as ScopedMemoryTracker
+from warp._src.context import print_memory_report as print_memory_report
 
 
 # category: Profiling > Timing Flags
@@ -458,41 +475,3 @@ from warp._src.context import RegisteredGLBuffer as RegisteredGLBuffer
 
 
 __version__ = config.version
-
-
-# TODO: Remove after cleaning up the public API.
-
-from warp._src import types as _types
-
-
-def __getattr__(name):
-    from warp._src.utils import get_deprecated_api  # noqa: PLC0415
-
-    if name == "mat":
-        return get_deprecated_api(_types, "warp", "matrix", old_attr_path="warp.mat")
-    elif name == "vec":
-        return get_deprecated_api(_types, "warp", "vector", old_attr_path="warp.vec")
-
-    if name in (
-        "build_dll",
-        "build",
-        "builtins",
-        "codegen",
-        "constants",
-        "context",
-        "dlpack",
-        "fabric",
-        "jax",
-        "marching_cubes",
-        "math",
-        "paddle",
-        "tape",
-        "torch",
-        "types",
-        "utils",
-    ):
-        import importlib  # noqa: PLC0415
-
-        return importlib.import_module(f".{name}", __package__)
-
-    raise AttributeError(f"module 'warp' has no attribute '{name}'")
