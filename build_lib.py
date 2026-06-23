@@ -314,6 +314,12 @@ def main(argv: list[str] | None = None) -> int:
         help="AMD GPU target architecture(s) for HIP (e.g., gfx90a, gfx942)",
     )
     group_build.add_argument(
+        "--hipcc-options",
+        type=str,
+        default=None,
+        help="Extra options to pass to hipcc when compiling HIP device sources (e.g., '-Xarch_device -fno-inline')",
+    )
+    group_build.add_argument(
         "--verify-fp",
         action=argparse.BooleanOptionalAction,
         default=False,
