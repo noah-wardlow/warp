@@ -817,6 +817,12 @@ def build_dll_for_arch(args, dll_path, cpp_paths, cu_paths, arch, libs: list[str
                     if hip_enabled:
                         hip_arches = _parse_hip_arches(args)
                         hip_arch_flags = " ".join([f"--offload-arch={arch}" for arch in hip_arches])
+                        # User-supplied extra hipcc options (e.g., "-Xarch_device -fno-inline"),
+                        # applied only to reduce.cu.
+                        if os.path.basename(cu_path) == "reduce.cu":
+                            hip_extra_flags = getattr(args, "hipcc_options", None) or ""
+                        else:
+                            hip_extra_flags = ""
                         # Match nvcc/NVRTC default: strict IEEE 754 FP semantics
                         hip_fp_flags = "-fno-finite-math-only -fno-associative-math -fno-reciprocal-math -fno-strict-aliasing"
                         # Match the host C++ ABI (`-D_GLIBCXX_USE_CXX11_ABI=0` is used for
@@ -827,13 +833,13 @@ def build_dll_for_arch(args, dll_path, cpp_paths, cu_paths, arch, libs: list[str
                         if mode == "debug":
                             cuda_cmd = (
                                 f'{hipcc_cmd} -x hip -std=c++17 -g -O0 -fPIC -fvisibility=hidden {hip_abi_flags} '
-                                f'-D_DEBUG -D_ITERATOR_DEBUG_LEVEL=0 {hip_fp_flags} {hip_arch_flags} -DWP_ENABLE_CUDA=1 '
+                                f'-D_DEBUG -D_ITERATOR_DEBUG_LEVEL=0 {hip_fp_flags} {hip_arch_flags} {hip_extra_flags} -DWP_ENABLE_CUDA=1 '
                                 f'-I"{native_dir}" -D{mathdx_enabled} {libmathdx_includes} -o "{cu_out}" -c "{cu_path}"'
                             )
                         elif mode == "release":
                             cuda_cmd = (
                                 f'{hipcc_cmd} -x hip -std=c++17 -O3 -fPIC -fvisibility=hidden {hip_abi_flags} -DNDEBUG '
-                                f'{hip_fp_flags} {hip_arch_flags} -DWP_ENABLE_CUDA=1 -I"{native_dir}" -D{mathdx_enabled} '
+                                f'{hip_fp_flags} {hip_arch_flags} {hip_extra_flags} -DWP_ENABLE_CUDA=1 -I"{native_dir}" -D{mathdx_enabled} '
                                 f'{libmathdx_includes} -o "{cu_out}" -c "{cu_path}"'
                             )
                     elif cuda_compiler == "nvcc":
