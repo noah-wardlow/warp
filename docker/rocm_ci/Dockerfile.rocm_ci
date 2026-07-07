@@ -53,7 +53,6 @@ ENV ROCM_PATH=/opt/rocm
 ENV PATH=${ROCM_PATH}/bin:${PATH}
 ENV LD_LIBRARY_PATH=${ROCM_PATH}/lib:${LD_LIBRARY_PATH}
 ENV HIP_PLATFORM=amd
-ENV HIP_DEVICE_LIB_PATH=${ROCM_PATH}/lib/llvm/amdgcn/bitcode
 
 WORKDIR /root/
 
@@ -76,6 +75,7 @@ RUN curl -L micro.mamba.pm/install.sh | bash && \
     /bin/bash -c "eval \"\$(~/.local/bin/micromamba shell hook --shell bash)\" && \
     micromamba activate ${MAMBA_ENV_NAME} && \
     cd /root/warp/ && \
+    git lfs pull && \
     python build_lib.py --hip-arch=${HIP_ARCH} --hipcc-options=\"-Xarch_device -fno-inline\" && \
     python -m build --wheel -C--build-option=-Plinux-x86_64 && \
     pip install dist/warp_lang-*.whl"
