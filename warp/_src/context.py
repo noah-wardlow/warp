@@ -3970,15 +3970,18 @@ class Device:
     def supports_graph_capture(self) -> bool:
         """A boolean indicating whether native graph capture is supported on this device.
 
-        Returns ``True`` for CPU (always recordable via APIC) and CUDA devices.
-        Returns ``False`` for HIP/ROCm devices: hipGraph is not yet mature in
-        Warp's runtime (mempool pointer remapping bugs, event timing inside
-        graphs, etc.), so :func:`capture_begin` / :class:`ScopedCapture` are
-        no-ops on HIP and :func:`capture_save` is unavailable for HIP-targeted
-        graphs.
+        Returns ``True`` for CPU (always recordable via APIC), CUDA, and HIP/ROCm
+        devices. HIP graph capture uses the same native capture/replay path as
+        CUDA (all ``hipGraph*`` entry points are aliased in ``hip_util.h``).
+
+        Note: two graph features remain gated separately on HIP:
+
+        - Conditional graph nodes (if/else/while subgraphs), tracked by
+          :func:`is_conditional_graph_supported` (still ``False`` on HIP).
+        - APIC ``.wrp`` serialization via :func:`capture_save`, which encodes a
+          CUDA ``sm`` architecture integer and does not yet support HIP ``gfx``
+          string architectures.
         """
-        if self.is_hip:
-            return False
         return True
 
     @property
@@ -9453,9 +9456,7 @@ def capture_begin(
     if stream is None:
         stream = device.stream
 
-    # HIP/ROCm graph capture is not yet mature (mempool pointer remapping bugs,
-    # event timing inside graphs, etc.). Disable until hipGraph stabilizes.
-    # See ``Device.supports_graph_capture`` -- callers (notably
+    # Devices that cannot record a native graph return early. Callers (notably
     # :class:`ScopedCapture`) treat a ``False`` return as "capture disabled" and
     # skip the matching :func:`capture_end`.
     if not device.supports_graph_capture:
@@ -9946,11 +9947,9 @@ def capture_launch(graph: Graph, stream: Stream | None = None):
 
     if graph is None:
         # ScopedCapture leaves ``graph=None`` when ``capture_begin`` returned
-        # False (currently only on HIP, where graph capture is unsupported;
-        # see ``Device.supports_graph_capture``).
+        # False on a device where ``Device.supports_graph_capture`` is False.
         raise RuntimeError(
-            "capture_launch() received graph=None: capture was not started. "
-            "On HIP/ROCm, native graph capture is unsupported "
+            "capture_launch() received graph=None: capture was not started "
             "(Device.supports_graph_capture is False); guard call sites or "
             "filter test devices with get_graph_capture_test_devices()."
         )
@@ -10025,6 +10024,15 @@ def capture_save(graph: Graph, path: str, inputs: dict | None = None, outputs: d
     """
     import os  # noqa: PLC0415
     import shutil  # noqa: PLC0415
+
+    if graph.device.is_hip:
+        # The APIC .wrp format encodes a CUDA sm architecture integer and derives
+        # the device type from it; HIP gfx string architectures are not yet
+        # representable. In-memory HIP graph capture/replay is unaffected.
+        raise RuntimeError(
+            "capture_save() is not supported on HIP/ROCm: the APIC .wrp format does not "
+            "yet support HIP gfx architectures. In-memory graph capture/replay is supported."
+        )
 
     if not graph.apic:
         raise RuntimeError(

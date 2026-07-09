@@ -543,9 +543,11 @@ def test_get_param_ptr(test, device):
         plain_capture.graph.get_param_ptr("a")
 
 
-# APIC capture/save/load requires native graph capture, which is not yet
-# supported on HIP/ROCm (see Device.supports_graph_capture).
-devices = get_graph_capture_test_devices()
+# APIC capture/save/load requires native graph capture (see
+# Device.supports_graph_capture). The .wrp serialization format does not yet
+# support HIP gfx architectures, so HIP/ROCm devices are excluded here (see
+# capture_save()).
+devices = [d for d in get_graph_capture_test_devices() if not d.is_hip]
 
 add_function_test(TestApic, "test_save_apic_false_error", test_save_apic_false_error, devices=devices)
 add_function_test(TestApic, "test_save_single_kernel", test_save_single_kernel, devices=devices)
@@ -565,8 +567,8 @@ add_function_test(
     TestApic,
     "test_save_load_fill",
     test_save_load_fill,
-    devices=[d for d in get_cuda_test_devices() if d.supports_graph_capture],
-)  # CPU: wp_memtile_host not recorded; HIP: no native graph capture
+    devices=[d for d in get_cuda_test_devices() if d.supports_graph_capture and not d.is_hip],
+)  # CPU: wp_memtile_host not recorded; HIP: .wrp format lacks gfx arch support (see capture_save)
 add_function_test(TestApic, "test_save_load_alloc_only", test_save_load_alloc_only, devices=devices)
 add_function_test(TestApic, "test_get_param_ptr", test_get_param_ptr, devices=devices)
 
