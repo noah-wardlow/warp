@@ -25,6 +25,12 @@
 // NVCC/HIPCC: Include runtime headers to get float4
 #if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
 #include "hip_util.h"
+// AMD rocWMMA: header-only MFMA C++ API (ROCm 7.x+, gfx942+)
+// Guard: exclude from HIPRTC JIT context — headers unavailable at JIT time
+#if defined(__HIP_DEVICE_COMPILE__) && !defined(__HIPCC_RTC__)
+#include <rocwmma/rocwmma.hpp>
+#define WP_ENABLE_ROCWMMA 1
+#endif
 #else
 #include <cuda_runtime.h>
 #endif
@@ -60,6 +66,22 @@ struct alignas(16) float4 {
 #define WP_PRAGMA_UNROLL
 #define WP_PRAGMA_NO_UNROLL
 
+#endif
+
+// AMD rocWMMA: header-only MFMA C++ API (ROCm 7.x+, gfx942+).
+// NOTE: the include near the top of this file is nested inside a !__HIPCC_RTC__
+// region (to avoid float4 redefinition from HIP runtime headers), so it is
+// unreachable under HIPRTC JIT.  rocWMMA itself, however, compiles cleanly under
+// HIPRTC, so we include it here — outside that region — guarded only by device
+// compile + header availability, making the MFMA fast path active for BOTH
+// AOT (warp.so) and HIPRTC-compiled user kernels.
+#if defined(__HIP_DEVICE_COMPILE__) && !defined(WP_ENABLE_ROCWMMA)
+#if defined(__has_include)
+#if __has_include(<rocwmma/rocwmma.hpp>)
+#include <rocwmma/rocwmma.hpp>
+#define WP_ENABLE_ROCWMMA 1
+#endif
+#endif
 #endif
 
 #define WP_USE_REGISTER_GEMM 0
@@ -5564,6 +5586,78 @@ inline CUDA_CALLABLE void scalar_matmul(const StorageA& A, const StorageB& B, St
     // Whether boundary checks can be eliminated at compile time
     constexpr bool aligned_m = (M % BM == 0);
     constexpr bool aligned_n = (N % BN == 0);
+
+    // AMD rocWMMA fast path: MFMA_F32_16x16x4 for 16x16 FP32 tiles
+    // Equivalent to WP_ENABLE_MATHDX / cuBLASDx path on NVIDIA
+#if defined(WP_ENABLE_ROCWMMA)
+    if constexpr (M == 16 && N == 16 && K % 4 == 0 &&
+                  sa1 == 1 && sb1 == 1 && sc1 == 1 &&  // require unit column strides
+                  sizeof(ElemA) == 4 && sizeof(ElemB) == 4 && sizeof(ElemC) == 4) {
+        rocwmma::fragment<rocwmma::matrix_a,    16, 16, 4, float, rocwmma::row_major> a_frag;
+        rocwmma::fragment<rocwmma::matrix_b,    16, 16, 4, float, rocwmma::row_major> b_frag;
+        rocwmma::fragment<rocwmma::accumulator, 16, 16, 4, float>                     c_frag;
+        // Correct GEMM: C_out = alpha * A@B + beta * C_in
+        // Implementation: always start c_frag=0, accumulate A@B via mma_sync,
+        // then apply alpha and beta element-wise AFTER the K-loop.
+        // This correctly separates alpha (scales A@B only) from beta (scales C_in only).
+        //
+        // IMPORTANT: Do NOT pre-load beta*C_in into c_frag before mma_sync.
+        // mma_sync does c += a*b, so if c=beta*C_in first, then alpha is applied
+        // to the whole accumulator: alpha*(A@B + beta*C_in) != alpha*A@B + beta*C_in.
+        // rocWMMA 16x16 REQUIRES exactly 64 threads per block (one full warp).
+        // Warp always uses WP_TILE_BLOCK_DIM=64 for HIP, but assert to be safe.
+        static_assert(WP_TILE_BLOCK_DIM == 64,
+            "rocWMMA MFMA_F32_16x16x4 requires exactly 64 threads; "
+            "set block_dim=64 when launching tile kernels on AMD.");
+        rocwmma::fill_fragment(c_frag, 0.0f);
+        for (int k = 0; k < K; k += 4) {
+            rocwmma::load_matrix_sync(a_frag, a_ptr + k,       sa0, rocwmma::mem_row_major);
+            rocwmma::load_matrix_sync(b_frag, b_ptr + k * sb0, sb0, rocwmma::mem_row_major);
+            rocwmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
+        }
+        // c_frag = A@B here. Now apply alpha and beta per-element.
+        T alpha_val = T(alpha);
+        // When Accumulate=false: overwrite C (beta must be 0 semantically).
+        // When Accumulate=true:  C_out = alpha*c_frag + beta*C_in.
+        if constexpr (!Accumulate) {
+            // Simple overwrite: C = alpha * A@B
+            if (alpha_val == T(1)) {
+                rocwmma::store_matrix_sync(c_ptr, c_frag, sc0, rocwmma::mem_row_major);
+            } else {
+                WP_PRAGMA_UNROLL
+                for (int i = 0; i < (int)c_frag.num_elements; i++) c_frag.x[i] *= float(alpha_val);
+                rocwmma::store_matrix_sync(c_ptr, c_frag, sc0, rocwmma::mem_row_major);
+            }
+        } else {
+            // Accumulate: C_out = alpha * A@B + beta * C_in
+            // Read C_in element-by-element from shared memory (already in L1).
+            // rocWMMA fragment element mapping for 16x16x4 accumulator:
+            // Each lane holds num_elements elements of the output tile.
+            // We use store+load of the A@B result combined with element-wise beta*C.
+            // Simpler: use load_matrix_sync to read C_in into a temporary fragment,
+            // then combine: c_out[i] = alpha*c_frag[i] + beta*c_in_frag[i].
+            T beta_val = T(beta);
+            if (beta_val == T(0)) {
+                // No C_in contribution needed
+                if (alpha_val != T(1)) {
+                    WP_PRAGMA_UNROLL
+                    for (int i = 0; i < (int)c_frag.num_elements; i++) c_frag.x[i] *= float(alpha_val);
+                }
+                rocwmma::store_matrix_sync(c_ptr, c_frag, sc0, rocwmma::mem_row_major);
+            } else {
+                // Load C_in into a separate fragment, combine element-wise
+                rocwmma::fragment<rocwmma::accumulator, 16, 16, 4, float> c_in_frag;
+                rocwmma::load_matrix_sync(c_in_frag, c_ptr, sc0, rocwmma::mem_row_major);
+                WP_PRAGMA_UNROLL
+                for (int i = 0; i < (int)c_frag.num_elements; i++) {
+                    c_frag.x[i] = float(alpha_val) * c_frag.x[i] + float(beta_val) * c_in_frag.x[i];
+                }
+                rocwmma::store_matrix_sync(c_ptr, c_frag, sc0, rocwmma::mem_row_major);
+            }
+        }
+        return;
+    }
+#endif  // WP_ENABLE_ROCWMMA
 
     for (int t = WP_TILE_THREAD_IDX; t < num_blocks; t += WP_TILE_BLOCK_DIM) {
         const int block_i = t / blocks_n;
