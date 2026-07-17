@@ -586,9 +586,10 @@ for src_type, src_ctor in array_constructors.items():
             # graph capture options. Graph capture of async copies is not yet
             # enabled on HIP/ROCm: copies that allocate a staging buffer during
             # capture and the expected-error paths do not clean up the stream
-            # capture reliably on HIP, poisoning subsequent tests. Basic capture
-            # and replay is validated separately (see test_graph). Deferred until
-            # the async-copy-capture path is hardened on HIP.
+            # capture reliably on HIP, poisoning subsequent tests (and cross-stream
+            # d2d capture can crash the process). Basic capture and replay is
+            # validated separately (see test_graph). Deferred until the async-copy
+            # capture path is hardened on HIP.
             graph_supported = (src_device.is_cuda and not src_device.is_hip) or (
                 dst_device.is_cuda and not dst_device.is_hip
             )

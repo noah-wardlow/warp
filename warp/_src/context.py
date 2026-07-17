@@ -8746,13 +8746,21 @@ def synchronize():
         # save the original context to avoid side effects
         saved_context = runtime.core.wp_cuda_context_get_current()
 
+        # Refuse to synchronize while a graph capture is active on ANY device
+        # before performing any partial synchronization. On HIP/ROCm graph
+        # capture is process-global, so synchronizing a non-capturing device's
+        # context while another device is capturing fails and invalidates the
+        # in-progress capture. Checking all devices up front keeps the error
+        # clean and leaves the capture intact on both CUDA and HIP.
+        for device in runtime.cuda_devices:
+            # avoid creating primary context if the device has not been used yet
+            if device.has_context and device.is_capturing:
+                raise RuntimeError(f"Cannot synchronize device {device} while graph capture is active")
+
         # TODO: only synchronize devices that have outstanding work
         for device in runtime.cuda_devices:
             # avoid creating primary context if the device has not been used yet
             if device.has_context:
-                if device.is_capturing:
-                    raise RuntimeError(f"Cannot synchronize device {device} while graph capture is active")
-
                 runtime.core.wp_cuda_context_synchronize(device.context)
 
         # restore the original context to avoid side effects

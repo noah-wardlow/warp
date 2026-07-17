@@ -543,11 +543,14 @@ def test_get_param_ptr(test, device):
         plain_capture.graph.get_param_ptr("a")
 
 
-# APIC capture/save/load requires native graph capture (see
-# Device.supports_graph_capture). The .wrp serialization format does not yet
-# support HIP gfx architectures, so HIP/ROCm devices are excluded here (see
-# capture_save()).
+# APIC save/load requires .wrp serialization, which does not yet support HIP gfx
+# architectures, so HIP/ROCm devices are excluded from tests that call
+# capture_save()/capture_load() (see capture_save()).
 devices = [d for d in get_graph_capture_test_devices() if not d.is_hip]
+
+# Tests that only exercise in-memory APIC capture/replay (no .wrp serialization)
+# run on every graph-capture device, including HIP/ROCm.
+graph_devices = get_graph_capture_test_devices()
 
 add_function_test(TestApic, "test_save_apic_false_error", test_save_apic_false_error, devices=devices)
 add_function_test(TestApic, "test_save_single_kernel", test_save_single_kernel, devices=devices)
@@ -556,11 +559,11 @@ add_function_test(TestApic, "test_save_load_multiple_kernels", test_save_load_mu
 add_function_test(TestApic, "test_save_load_memcpy", test_save_load_memcpy, devices=devices)
 add_function_test(TestApic, "test_save_load_memset", test_save_load_memset, devices=devices)
 add_function_test(TestApic, "test_bindings_param_update", test_bindings_param_update, devices=devices)
-add_function_test(TestApic, "test_array_slicing", test_array_slicing, devices=devices)
+add_function_test(TestApic, "test_array_slicing", test_array_slicing, devices=graph_devices)
 add_function_test(TestApic, "test_complex_pipeline", test_complex_pipeline, devices=devices)
 add_function_test(TestApic, "test_internal_allocation", test_internal_allocation, devices=devices)
 add_function_test(TestApic, "test_multiple_internal_allocations", test_multiple_internal_allocations, devices=devices)
-add_function_test(TestApic, "test_graph_execution_unchanged", test_graph_execution_unchanged, devices=devices)
+add_function_test(TestApic, "test_graph_execution_unchanged", test_graph_execution_unchanged, devices=graph_devices)
 add_function_test(TestApic, "test_save_load_with_param_update", test_save_load_with_param_update, devices=devices)
 add_function_test(TestApic, "test_save_load_memcpy_and_kernel", test_save_load_memcpy_and_kernel, devices=devices)
 add_function_test(
