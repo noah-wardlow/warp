@@ -1254,6 +1254,14 @@ __global__ void memset_kernel(int* dest, int value, size_t n)
 
 bool wp_memset_device(void* context, void* dest, int value, size_t n, void* stream)
 {
+    // A zero-length memset is a no-op. CUDA's cudaMemsetAsync accepts (dest,0)
+    // (even a null dest) and returns success, but ROCm's hipMemsetAsync rejects
+    // it with hipErrorInvalidValue ("invalid argument"). Short-circuit to match
+    // CUDA semantics; this removes the spurious errors emitted by zero-length
+    // array .zero_() calls (e.g. during hipGraph capture warmup on gfx942).
+    if (n == 0)
+        return true;
+
     ContextGuard guard(context);
 
     cudaStream_t cuda_stream;
