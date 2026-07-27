@@ -66,6 +66,13 @@ import warp._src.build
 import warp._src.codegen
 import warp._src.module_registry
 import warp.config
+
+# Allow WARP_ENABLE_MEMPOOLS_AT_INIT=0 to opt out of memory pool auto-enable.
+# This is useful when Warp is used alongside other GPU frameworks (e.g. PyTorch-ROCm)
+# whose allocators conflict with Warp's memory pool on certain platforms.
+# If the variable is set to 0, warp.config.enable_mempools_at_init is overridden.
+if os.environ.get(WARP_ENABLE_MEMPOOLS_AT_INIT) == 0:
+    warp.config.enable_mempools_at_init = False
 from warp._src.codegen import WarpCodegenError, WarpCodegenTypeError, _codegen_lock, synchronized
 from warp._src.logger import LOG_DEBUG, LOG_WARNING, get_logger, log_debug, log_error, log_info, log_warning
 from warp._src.texture import Texture1D, Texture2D, Texture3D, texture1d_t, texture2d_t, texture3d_t
