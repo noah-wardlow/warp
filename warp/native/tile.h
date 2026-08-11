@@ -5819,6 +5819,58 @@ inline CUDA_CALLABLE void scalar_cholesky_impl(TileA& A, TileOut& Out)
     }
 }
 
+// Thread-cooperative Cholesky factorization for the HIP/CUDA no-MathDx fallback.
+// The stock scalar_cholesky_impl runs its full O(n^3) column-serial loop redundantly
+// on EVERY block thread, turning a small factorization into a long dependent-LDS chain
+// (the dominant cost on gfx942). This version has the whole block cooperate on a single
+// matrix: one lane owns each trailing row (lower) / column (upper), the pivot sqrt is
+// done by a single lane and broadcast through the shared Out tile, and the rank-1 update
+// is spread across lanes. Critical path drops to O(n^2) with O(n) __syncthreads barriers.
+// Semantics (read/write pattern, opposite-triangle zeroing) match scalar_cholesky_impl,
+// including the in-place case (A aliases Out).
+template <bool Upper, typename TileA, typename TileOut>
+inline CUDA_CALLABLE void cooperative_cholesky_impl(TileA& A, TileOut& Out)
+{
+    using T = typename TileA::Type;
+    constexpr int n = TileA::Layout::Shape::dim(1);
+    const int tid = WP_TILE_THREAD_IDX;
+    const int bdim = WP_TILE_BLOCK_DIM;
+
+    // Out(row,col) for lower, Out(col,row) for upper (factor is stored in one triangle).
+    auto idx = [](int row, int col) { return Upper ? tile_coord(col, row) : tile_coord(row, col); };
+
+    for (int j = 0; j < n; ++j) {
+        // Pivot: a single lane computes the diagonal factor and publishes it via Out.
+        if (tid == 0) {
+            T s = Out.data(tile_coord(j, j));
+            for (int k = 0; k < j; ++k) {
+                T r = Out.data(idx(j, k));
+                s -= r * r;
+            }
+            Out.data(idx(j, j)) = wp::sqrt(s);
+        }
+        WP_TILE_SYNC();
+
+        T invS = T(1.0) / Out.data(idx(j, j));
+
+        // Trailing entries (row/col j+1..n-1), distributed round-robin across lanes.
+        for (int i = j + 1 + tid; i < n; i += bdim) {
+            T s = Upper ? A.data(tile_coord(j, i)) : A.data(tile_coord(i, j));
+            for (int k = 0; k < j; ++k) {
+                s -= Out.data(idx(i, k)) * Out.data(idx(j, k));
+            }
+            Out.data(idx(i, j)) = s * invS;
+        }
+
+        // Zero the opposite triangle for line j (disjoint from the writes above).
+        for (int k = j + 1 + tid; k < n; k += bdim) {
+            Out.data(idx(j, k)) = T {};
+        }
+
+        WP_TILE_SYNC();
+    }
+}
+
 // Writes into X
 template <bool Upper, typename TileA, typename TileX, typename TileY>
 inline CUDA_CALLABLE void scalar_cholesky_forward_substitution(TileA& A, TileX& X, TileY& Y)
@@ -6307,7 +6359,16 @@ CUDA_CALLABLE TileOut& tile_cholesky_impl(Fwd fun_forward, TileA& A, TileOut& Ou
 
 #if !defined(__CUDA_ARCH__) || WP_ENABLE_MATHDX == 0
 
+#if defined(__HIP_DEVICE_COMPILE__) || defined(__CUDA_ARCH__)
+    // GPU fallback (no MathDx / no MFMA path): block-cooperative factorization.
+    // Ensure the Out = A copy above is visible to all lanes before cooperating.
+    WP_TILE_SYNC();
+    partitioned_gemm::cooperative_cholesky_impl<Upper>(A, Out);
+    WP_TILE_SYNC();
+#else
+    // CPU host: single-threaded scalar factorization.
     partitioned_gemm::scalar_cholesky_impl<Upper>(A, Out);
+#endif
 
 #else
 
@@ -6440,7 +6501,15 @@ CUDA_CALLABLE void tile_cholesky_inplace_impl(Fwd fun_forward, TileA& A)
 
 #if !defined(__CUDA_ARCH__) || WP_ENABLE_MATHDX == 0
 
+#if defined(__HIP_DEVICE_COMPILE__) || defined(__CUDA_ARCH__)
+    // GPU fallback (no MathDx / no MFMA path): block-cooperative factorization.
+    WP_TILE_SYNC();
+    partitioned_gemm::cooperative_cholesky_impl<Upper>(A, A);
+    WP_TILE_SYNC();
+#else
+    // CPU host: single-threaded scalar factorization.
     partitioned_gemm::scalar_cholesky_impl<Upper>(A, A);
+#endif
 
 #else
 
