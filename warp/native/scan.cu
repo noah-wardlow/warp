@@ -105,7 +105,7 @@ void scan_device(
 
     // hipCUB rejects managed memory for temp buffers.
     // Force mempool path even on UMA devices.
-    void* temp_buffer = wp_alloc_device_async(WP_CURRENT_CONTEXT, scan_temp_size, "(native:scan)");
+    void* temp_buffer = wp_alloc_device_async(WP_CURRENT_CONTEXT, scan_temp_size, WP_CURRENT_STREAM, "(native:scan)");
 
     // scan each scalar component independently
     for (int k = 0; k < type_length; ++k) {

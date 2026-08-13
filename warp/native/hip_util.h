@@ -199,6 +199,18 @@ static inline hiprtcResult nvrtcGetSupportedArchs(int* archs)
 #ifndef cudaStreamEndCapture
 #define cudaStreamEndCapture hipStreamEndCapture
 #endif  // cudaStreamEndCapture
+#ifndef cudaStreamGetId
+#define cudaStreamGetId hipStreamGetId
+#endif  // cudaStreamGetId
+#ifndef cudaStreamGetFlags
+#define cudaStreamGetFlags hipStreamGetFlags
+#endif  // cudaStreamGetFlags
+#ifndef cudaStreamNonBlocking
+#define cudaStreamNonBlocking hipStreamNonBlocking
+#endif  // cudaStreamNonBlocking
+#ifndef cudaMemoryTypeManaged
+#define cudaMemoryTypeManaged hipMemoryTypeManaged
+#endif  // cudaMemoryTypeManaged
 // Deliberately not defined here: the real mapping to
 // hipStreamSetCaptureDependencies is further down. Defining it to 0 first
 // silently won the #ifndef race and made it equal to

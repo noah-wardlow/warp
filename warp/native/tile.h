@@ -596,6 +596,9 @@ template <typename T, typename Shape> struct tile_vectorized_check_t {
 #if defined(__CUDA_ARCH__)
         if (reinterpret_cast<uint64_t>(global128) % sizeof(float4) != 0)
             __trap();
+#elif defined(__HIP_DEVICE_COMPILE__)
+        if (reinterpret_cast<uint64_t>(global128) % sizeof(float4) != 0)
+            __builtin_trap();
 #endif
 
 #ifndef NDEBUG

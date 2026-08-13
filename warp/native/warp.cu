@@ -895,7 +895,7 @@ void* wp_alloc_device(void* context, size_t s, const char* tag)
         if (!wp_cuda_stream_is_capturing(get_current_stream(context)))
             return wp_alloc_device_default(context, s, tag);
 
-        void* ptr = wp_alloc_device_async(context, s, tag);
+        void* ptr = wp_alloc_device_async(context, s, WP_CURRENT_STREAM, tag);
         if (ptr) {
             std::lock_guard<std::mutex> guard(g_hip_pool_allocs_mutex);
             g_hip_pool_allocs.insert(ptr);
@@ -6110,9 +6110,19 @@ static int get_cuda_kernel_attribute(void* context, void* kernel, CUfunction_att
 
     ContextGuard guard(context);
 
+#if defined(__HIP_PLATFORM_AMD__)
+    // Call hipFuncGetAttribute directly rather than through cuFuncGetAttribute_f:
+    // the wrapper is compiled in a plain C++ translation unit where
+    // CUfunction_attribute resolves to a different type than it does in this HIP
+    // translation unit, so a call from here compiles but does not link.
+    int value = 0;
+    if (hipFuncGetAttribute(&value, (hipFunction_attribute)attribute, (hipFunction_t)kernel) != hipSuccess)
+        return -1;
+#else
     int value = 0;
     if (!check_cu(cuFuncGetAttribute_f(&value, attribute, (CUfunction)kernel)))
         return -1;
+#endif  // defined(__HIP_PLATFORM_AMD__)
 
     return value;
 }

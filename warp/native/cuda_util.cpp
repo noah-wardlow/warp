@@ -990,9 +990,26 @@ CUresult cuCtxSynchronize_f()
 #endif  // defined(__HIP_PLATFORM_AMD__)
 }
 
-CUresult cuProfilerStart_f() { return pfn_cuProfilerStart ? pfn_cuProfilerStart() : DRIVER_ENTRY_POINT_ERROR; }
+CUresult cuProfilerStart_f()
+{
+#if defined(__HIP_PLATFORM_AMD__)
+    // hipProfilerStart is deprecated and itself returns hipErrorNotSupported;
+    // report that directly rather than calling through it. Use roctracer/rocTX
+    // for profiling on ROCm.
+    return hipErrorNotSupported;
+#else
+    return pfn_cuProfilerStart ? pfn_cuProfilerStart() : DRIVER_ENTRY_POINT_ERROR;
+#endif  // defined(__HIP_PLATFORM_AMD__)
+}
 
-CUresult cuProfilerStop_f() { return pfn_cuProfilerStop ? pfn_cuProfilerStop() : DRIVER_ENTRY_POINT_ERROR; }
+CUresult cuProfilerStop_f()
+{
+#if defined(__HIP_PLATFORM_AMD__)
+    return hipErrorNotSupported;
+#else
+    return pfn_cuProfilerStop ? pfn_cuProfilerStop() : DRIVER_ENTRY_POINT_ERROR;
+#endif  // defined(__HIP_PLATFORM_AMD__)
+}
 
 CUresult cuCtxGetDevice_f(CUdevice* dev)
 {
