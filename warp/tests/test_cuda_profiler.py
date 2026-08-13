@@ -132,6 +132,8 @@ class TestCudaProfiler(unittest.TestCase):
         profiler collection actually toggled is not asserted (see class docstring).
         """
         device = wp.get_cuda_device()
+        if device.is_hip:
+            self.skipTest("Profiler start/stop is not supported on HIP/ROCm (use roctracer/rocTX)")
         a = wp.zeros(16, dtype=float, device=device)
 
         wp.cuda_profiler_start(device=device)
