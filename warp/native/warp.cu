@@ -6093,6 +6093,31 @@ bool wp_cuda_configure_kernel_shared_memory(void* kernel, int size)
 {
     int requested_smem_bytes = size;
 
+#if defined(__HIP_PLATFORM_AMD__)
+    // hipFuncSetAttribute is a runtime-API entry point that expects a host
+    // function symbol; handed a hipFunction_t it applies and validates
+    // nothing and reports success, so an oversized request would sail
+    // through here and fault at launch. Dynamic shared memory needs no
+    // attribute on HIP (it is passed at launch), so validating the budget is
+    // all this function must do: reject requests the device cannot satisfy,
+    // matching the driver rejection CUDA produces.
+    int static_smem_bytes = 0;
+    if (hipFuncGetAttribute(&static_smem_bytes, HIP_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES, (hipFunction_t)kernel)
+        != hipSuccess)
+        return false;
+
+    int device = -1;
+    if (hipGetDevice(&device) != hipSuccess)
+        return false;
+
+    // Same attribute the device's max_shared_memory_per_block is populated
+    // from, so this check and the Python-side shortfall clause agree.
+    int max_smem_bytes = 0;
+    if (hipDeviceGetAttribute(&max_smem_bytes, hipDeviceAttributeSharedMemPerBlockOptin, device) != hipSuccess)
+        return false;
+
+    return requested_smem_bytes <= max_smem_bytes - static_smem_bytes;
+#else
     // configure shared memory
     CUresult res = cuFuncSetAttribute_f(
         (CUfunction)kernel, CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, requested_smem_bytes
@@ -6101,6 +6126,7 @@ bool wp_cuda_configure_kernel_shared_memory(void* kernel, int size)
         return false;
 
     return true;
+#endif  // defined(__HIP_PLATFORM_AMD__)
 }
 
 static int get_cuda_kernel_attribute(void* context, void* kernel, CUfunction_attribute attribute)
@@ -6387,11 +6413,22 @@ size_t wp_cuda_launch_kernel(
     // of cluster_dim, so an empty clustered launch (e.g. a recorded lean launch resized via
     // set_dim(0)) would otherwise be rejected by CUDA.
     CUresult res = CUDA_SUCCESS;
-    if (dim > 0)
-        res = cuLaunchKernel_f(
-            (CUfunction)kernel, grid_x, grid_y, grid_z, block_dim, 1, 1, shared_memory_bytes,
-            static_cast<CUstream>(stream), args, 0
-        );
+    if (dim > 0) {
+#if defined(__HIP_PLATFORM_AMD__)
+        // hipModuleLaunchKernel does not reject an over-budget dynamic
+        // shared-memory request up front the way cuLaunchKernel does — the
+        // kernel launches, faults, and poisons the context. Enforce the
+        // budget here so the failure surfaces as the launch error it is on
+        // CUDA and the caller can report the shortfall.
+        if (shared_memory_bytes > 0 && !wp_cuda_configure_kernel_shared_memory(kernel, shared_memory_bytes))
+            res = hipErrorInvalidValue;  // what cuLaunchKernel returns for an over-budget request
+        else
+#endif
+            res = cuLaunchKernel_f(
+                (CUfunction)kernel, grid_x, grid_y, grid_z, block_dim, 1, 1, shared_memory_bytes,
+                static_cast<CUstream>(stream), args, 0
+            );
+    }
 
     check_cu(res);
 
