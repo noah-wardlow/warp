@@ -1,0 +1,1 @@
+Fix nondeterministic illegal-memory-access crashes (HIP error 700) in the block-wide tiled BVH and mesh AABB queries on RDNA GPUs (e.g. gfx1151), where a cooperative traversal could dereference an out-of-range index. CUDA behavior is unchanged.

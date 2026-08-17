@@ -91,7 +91,10 @@ def test_ipc_multiprocess_write(test, device):
     assert_np_equal(test_array.numpy(), np.full(test_array.shape, 168.0, dtype=np.float32))
 
 
-cuda_devices = get_cuda_test_devices()
+# CUDA/HIP IPC shares handles to separate device memory between processes; a
+# gfx1151 APU has unified memory and no functional IPC (HIP reports the API as
+# available but returns invalid handles), so run these on non-HIP devices only.
+cuda_devices = [d for d in get_cuda_test_devices() if not wp.get_device(d).is_hip]
 
 
 class TestIpc(unittest.TestCase):

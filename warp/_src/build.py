@@ -34,6 +34,80 @@ LTO_CACHE_KEY_LENGTH = 16
 _resolved_kernel_cache_dir: str | None = None
 
 
+# Above this generated-source size, HIP kernels are compiled AOT via hipcc instead
+# of in-process HIPRTC. ROCm 7.2's clang AMDGPU backend segfaults (in SelectionDAG
+# FoldConstantArithmetic during type legalization) on certain kernels — e.g. a
+# uint8 matrix ddot — when -DNDEBUG is combined with -O2/-O3. Because HIPRTC runs
+# in-process, that crash takes down the whole Warp process and cannot be caught.
+# hipcc runs out-of-process (crash-isolated). The trigger is content, not size, but
+# the test suite bundles the offending kernels into large per-file modules, so a
+# size threshold routes those to the AOT path while keeping normal modules on the
+# fast in-process HIPRTC path. The AOT path tries -DNDEBUG first (so innocent large
+# modules keep the smaller/faster release codegen) and only retries without it if
+# the compiler segfaults. Set the env var to 0 to force AOT for all HIP modules
+# (e.g. if a small module hits the trigger). See KNOWN_ISSUES-AMD.md and patches/rocm/.
+WP_HIP_HIPRTC_MAX_SRC_BYTES = int(os.environ.get("WARP_HIP_HIPRTC_MAX_SRC_BYTES", 2_000_000))
+
+
+def _hipcc_genco_cmd(hipcc, cu_path, output_path, arch_suffix, inc_dirs, config, optimization_level, fast_math, fuse_fp, lineinfo, ndebug):
+    """Build a hipcc --genco command mirroring the HIPRTC options in warp.cu's
+    wp_cuda_compile_program. ``ndebug`` controls whether -DNDEBUG is added."""
+    cmd = [hipcc, "--genco", f"--offload-arch={arch_suffix}", "-std=c++17", "-fPIC"]
+    cmd += ["-fno-finite-math-only", "-fno-associative-math", "-fno-reciprocal-math", "-fno-strict-aliasing"]
+    cmd += ["-Xclang", "-target-feature", "-Xclang", "-real-true16"]
+    if config == "debug":
+        cmd += ["-O0", "-g"]
+    elif optimization_level >= 0:
+        cmd += [f"-O{optimization_level}"]
+    if not config == "debug" and ndebug:
+        cmd += ["-DNDEBUG"]
+    if fast_math:
+        cmd += ["-ffast-math"]
+    if fuse_fp:
+        cmd += ["-ffp-contract=fast"]
+    if lineinfo:
+        cmd += ["-gline-tables-only"]
+    for inc in inc_dirs:
+        cmd += ["-I", inc]
+    cmd += ["-o", output_path, cu_path]
+    return cmd
+
+
+def _build_hip_aot(cu_path, output_path, arch_suffix, inc_dirs, config, optimization_level, fast_math, fuse_fp, lineinfo):
+    """Compile a HIP module out-of-process with hipcc --genco. Used for large HIP
+    modules so the ROCm clang backend crash (SelectionDAG FoldConstantArithmetic on
+    e.g. a uint8 matrix ddot with -DNDEBUG at -O2/-O3) is isolated from the Warp
+    process. Try with -DNDEBUG first (keeps the smaller/faster release codegen for
+    innocent large modules); if the compiler segfaults, retry without it (the
+    documented workaround). See KNOWN_ISSUES-AMD.md and patches/rocm/."""
+    import shutil  # noqa: PLC0415
+    import subprocess  # noqa: PLC0415
+
+    rocm_path = os.environ.get("ROCM_PATH", "/opt/rocm")
+    hipcc = os.path.join(rocm_path, "bin", "hipcc")
+    if not os.path.exists(hipcc):
+        hipcc = shutil.which("hipcc") or hipcc
+
+    last = None
+    for ndebug in (True, False):
+        cmd = _hipcc_genco_cmd(
+            hipcc, cu_path, output_path, arch_suffix, inc_dirs, config, optimization_level, fast_math, fuse_fp,
+            lineinfo, ndebug,
+        )
+        result = subprocess.run(cmd, capture_output=True, text=True)  # noqa: PLW1510
+        if result.returncode == 0 and os.path.exists(output_path):
+            return
+        last = result
+        # A negative return code (killed by signal, e.g. SIGSEGV) or a reported
+        # crash is the known -DNDEBUG backend bug: retry once without -DNDEBUG.
+        crashed = result.returncode < 0 or "Segmentation fault" in (result.stderr or "")
+        if not (ndebug and crashed):
+            break
+
+    tail = (last.stderr or last.stdout or "")[-2000:] if last is not None else ""
+    raise Exception(f"HIP AOT (hipcc) build failed with code {getattr(last, 'returncode', '?')}:\n{tail}")
+
+
 # builds cuda source to PTX or CUBIN using NVRTC (output type determined by output_path extension)
 def build_cuda(
     cu_path,
@@ -59,6 +133,21 @@ def build_cuda(
     cu_path_bytes = cu_path.encode("utf-8")
     program_name_bytes = os.path.basename(cu_path).encode("utf-8")
     inc_path = os.path.join(warp_home, "native").encode("utf-8")
+    # AMD HIP: hipRTC needs system headers (float.h, stddef.h, etc.)
+    import glob
+    gcc_includes = glob.glob("/usr/lib/gcc/x86_64-linux-gnu/*/include")
+    hip_extra_includes = gcc_includes[-1] if gcc_includes else "/usr/lib/gcc/x86_64-linux-gnu/13/include"
+
+    # HIP (arch=0, arch_suffix like "gfx1151"): route very large modules to the
+    # out-of-process hipcc AOT path, which sidesteps the in-process HIPRTC crash.
+    is_hip = arch == 0 and arch_suffix and arch_suffix.startswith("gfx")
+    if is_hip and not llvm_cuda and len(src) > WP_HIP_HIPRTC_MAX_SRC_BYTES:
+        inc_dirs = [os.path.join(warp_home, "native"), "/opt/rocm/include", hip_extra_includes]
+        _build_hip_aot(
+            cu_path, output_path, arch_suffix, inc_dirs, config, optimization_level, fast_math, fuse_fp, lineinfo
+        )
+        return
+
     output_path = output_path.encode("utf-8")
 
     if llvm_cuda:
@@ -81,14 +170,24 @@ def build_cuda(
         # isolated between threads and processes to avoid .pch races.
         pch_dir_bytes = pch_dir.encode("utf-8") if pch_dir else None
         arch_suffix_bytes = arch_suffix.encode("utf-8")
+        # For HIP (arch=0, arch_suffix starts with "gfx"): add ROCm and GCC system
+        # include paths so hipRTC can find <hip/hip_runtime.h>, <stddef.h>, etc.
+        is_hip = (arch == 0 and arch_suffix and arch_suffix.startswith("gfx"))
+        if is_hip:
+            extra_inc_dirs = [b"/opt/rocm/include", hip_extra_includes.encode("utf-8")]
+            num_extra_inc = len(extra_inc_dirs)
+            arr_extra_inc = (ctypes.c_char_p * num_extra_inc)(*extra_inc_dirs)
+        else:
+            num_extra_inc = 0
+            arr_extra_inc = None
         err = warp._src.context.runtime.core.wp_cuda_compile_program(
             src,
             program_name_bytes,
             arch,
             arch_suffix_bytes,
             inc_path,
-            0,
-            None,
+            num_extra_inc,
+            arr_extra_inc,
             config == "debug",
             optimization_level,
             warp.config.verbose or warp.config.log_level <= LOG_DEBUG,
@@ -136,6 +235,10 @@ def build_cpu(
         src = cpp.read()
     cpp_path = cpp_path.encode("utf-8")
     inc_path = os.path.join(warp_home, "native").encode("utf-8")
+    # AMD HIP: hipRTC needs system headers (float.h, stddef.h, etc.)
+    import glob
+    gcc_includes = glob.glob("/usr/lib/gcc/x86_64-linux-gnu/*/include")
+    hip_extra_includes = gcc_includes[-1] if gcc_includes else "/usr/lib/gcc/x86_64-linux-gnu/13/include"
     obj_path = obj_path.encode("utf-8")
 
     flags_list = extra_flags.split()

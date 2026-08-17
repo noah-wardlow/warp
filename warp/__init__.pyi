@@ -264,6 +264,7 @@ from warp.config import DeterministicMode as DeterministicMode
 from warp._src.math import *
 from warp._src.marching_cubes import MarchingCubes as MarchingCubes
 from warp._src.context import RegisteredGLBuffer as RegisteredGLBuffer
+from warp._src.uma import ReadbackBuffer as ReadbackBuffer
 Length = TypeVar("Length", bound=int)
 Rows = TypeVar("Rows", bound=int)
 Cols = TypeVar("Cols", bound=int)

@@ -14,6 +14,7 @@ setting documentation for details.
 For information on module-level and kernel-level settings, see :doc:`/user_guide/configuration`.
 """
 
+import os as _os
 import sys as _sys
 import types as _types
 from enum import IntEnum as _IntEnum
@@ -408,6 +409,37 @@ nested loops. This can result in a large amount of automatically generated code
 if each nested loop is below the ``max_unroll`` threshold.
 
 This setting can be overridden at the module level by setting the ``"max_unroll"`` module option.
+"""
+
+hip_fast_fp_atomics: bool = _os.environ.get("WARP_HIP_FAST_FP_ATOMICS", "0") == "1"
+"""Lower float32 atomic accumulation to the hardware atomic on HIP devices.
+
+HIP compiles ``atomicAdd()`` on a float to a compare-and-swap retry loop, because
+it cannot prove the target is coarse-grained memory. On a contended address that
+is far slower than the hardware instruction this setting selects instead.
+
+Affects every float32 accumulation that routes through ``atomic_add``, which
+includes :func:`warp.atomic_sub` (implemented as an add of the negated value) and
+the vector, matrix, quaternion and transform overloads, which accumulate
+component by component. ``atomic_max``, ``atomic_min`` and the float64 forms are
+unaffected.
+
+Off by default. The hardware instruction silently discards every update whose
+target is host-coherent memory, because it executes in the GPU's L2 cache and
+host-coherent pages are mapped to bypass it. Warp's own managed allocations —
+the UMA hybrid allocator and :class:`~warp.ReadbackBuffer` — are marked
+coarse-grained when they are created, so they are cached in L2 and this setting
+is safe on them.
+
+It is **not** safe on managed memory Warp did not allocate that way, notably
+arrays from :class:`~warp.CudaManagedAllocator`, whose CUDA managed-memory
+coherence contract Warp does not silently change. A float32 atomic into such an
+array is discarded with no error. Has no effect on CUDA devices or on the CPU.
+
+Read once from the ``WARP_HIP_FAST_FP_ATOMICS`` environment variable at import.
+Set it before the modules it should apply to are created, since each module
+captures the value when it is defined. It can also be overridden per module by
+setting the ``"hip_fast_fp_atomics"`` module option.
 """
 
 enable_tiles_in_stack_memory: bool | None = True

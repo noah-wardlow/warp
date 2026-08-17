@@ -294,6 +294,25 @@ def test_atomic_max_unsupported_dtypes(test, device, dtype):
         wp.launch(kernel, dim=1, outputs=(arr,), device=device)
 
 
+# module="unique" because hip_fast_fp_atomics is a module-level option and must
+# not change how the rest of this file is compiled
+@wp.kernel(module_options={"hip_fast_fp_atomics": True}, module="unique")
+def atomic_add_contended_kernel(dst: wp.array(dtype=wp.float32)):
+    wp.tid()
+    wp.atomic_add(dst, 0, 1.0)
+
+
+def test_atomic_add_hip_fast_fp_atomics(test, device):
+    # The opt-in hardware float atomic must still sum exactly on the allocators
+    # the default configuration uses. 2**20 is well inside float32's exact
+    # integer range, so any shortfall is a dropped update rather than rounding.
+    n = 1 << 20
+    dst = wp.zeros(1, dtype=wp.float32, device=device)
+    wp.launch(atomic_add_contended_kernel, dim=n, inputs=[dst], device=device)
+    wp.synchronize_device(device)
+    test.assertEqual(float(dst.numpy()[0]), float(n))
+
+
 devices = get_test_devices()
 
 
@@ -301,6 +320,9 @@ class TestAtomic(unittest.TestCase):
     pass
 
 
+add_function_test(
+    TestAtomic, "test_atomic_add_hip_fast_fp_atomics", test_atomic_add_hip_fast_fp_atomics, devices=devices
+)
 add_function_test(TestAtomic, "test_atomic_int", test_atomic_int, devices=devices)
 add_function_test(TestAtomic, "test_atomic_float", test_atomic_float, devices=devices)
 add_function_test(TestAtomic, "test_atomic_double", test_atomic_double, devices=devices)

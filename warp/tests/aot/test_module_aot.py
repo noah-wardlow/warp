@@ -343,6 +343,11 @@ class TestModuleAOT(unittest.TestCase):
             self.skipTest("NVRTC not available")
 
         arch = supported_archs[0]
+        # PTX is NVIDIA-specific IR compiled for an integer compute capability.
+        # On HIP get_cuda_supported_archs() returns gfx strings, for which PTX
+        # compilation is not defined, so this CUDA-only path does not apply.
+        if not isinstance(arch, int):
+            self.skipTest("PTX compilation targets a CUDA compute capability; not applicable on HIP")
 
         try:
             shutil.rmtree(TEST_CACHE_DIR, ignore_errors=True)

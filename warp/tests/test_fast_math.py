@@ -164,6 +164,8 @@ def test_approx_div_inverse(test, device):
 
 def test_approx_div_ptx_verification(test, device):
     """Verify that generated PTX contains approximate division/reciprocal instructions."""
+    if wp.get_device(device).is_hip:
+        test.skipTest("PTX verification is CUDA-only (HIP emits GPU code objects, not PTX)")
     tmpdir = tempfile.mkdtemp()
     try:
         module = wp.get_module(__name__)

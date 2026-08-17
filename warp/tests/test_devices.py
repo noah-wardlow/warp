@@ -158,11 +158,16 @@ class TestDevices(unittest.TestCase):
             self.assertTrue(len(archs) > 0, "No CUDA supported architectures found")
 
         # Validate the list contents (may be non-empty even without
-        # CUDA devices when NVRTC is available without a driver)
+        # CUDA devices when NVRTC is available without a driver).
+        # On HIP/ROCm, architectures are gfx target strings (e.g. "gfx1151"),
+        # not sm_XX compute-capability integers.
         for arch in archs:
-            self.assertIsInstance(arch, int, f"Architecture value {arch} should be an integer")
-            self.assertGreaterEqual(arch, 50, f"Architecture {arch} should be >= 50 (e.g., sm_50)")
-            self.assertLessEqual(arch, 150, f"Architecture {arch} seems unreasonably high")
+            if isinstance(arch, str):
+                self.assertTrue(arch.startswith("gfx"), f"HIP architecture {arch} should start with 'gfx'")
+            else:
+                self.assertIsInstance(arch, int, f"Architecture value {arch} should be an integer")
+                self.assertGreaterEqual(arch, 50, f"Architecture {arch} should be >= 50 (e.g., sm_50)")
+                self.assertLessEqual(arch, 150, f"Architecture {arch} seems unreasonably high")
 
         # Check the list is sorted with no duplicates
         self.assertEqual(archs, sorted(archs), "Architecture list should be sorted")

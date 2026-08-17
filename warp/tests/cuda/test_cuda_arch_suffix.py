@@ -135,7 +135,10 @@ def test_compile_kernel_with_suffix_f(test, device):
     np.testing.assert_allclose(b.numpy(), np.ones(n))
 
 
-devices = get_selected_cuda_test_devices("basic")
+# The CUDA arch-suffix scheme (sm_XX compute capabilities, the "a"/"f"
+# arch-specific/family suffixes) is NVIDIA-specific; HIP/ROCm uses gfx targets
+# and has no equivalent, so run these on non-HIP devices only.
+devices = [d for d in get_selected_cuda_test_devices("basic") if not wp.get_device(d).is_hip]
 
 
 class TestCudaArchSuffix(unittest.TestCase):

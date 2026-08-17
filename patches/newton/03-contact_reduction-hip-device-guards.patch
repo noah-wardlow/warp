@@ -1,0 +1,38 @@
+--- a/newton/_src/geometry/contact_reduction.py	2026-07-03 07:48:01.037349679 +0200
++++ b/newton/_src/geometry/contact_reduction.py	2026-07-03 07:40:07.271250369 +0200
+@@ -76,7 +76,7 @@
+ 
+ 
+ @wp.func_native("""
+-#if defined(__CUDA_ARCH__)
++#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
+ __syncthreads();
+ #endif
+ """)
+@@ -349,7 +349,7 @@
+     """
+ 
+     snippet = f"""
+-#if defined(__CUDA_ARCH__)
++#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
+     constexpr int array_size = {array_size};
+     __shared__ int s[array_size];
+     auto ptr = &s[0];
+@@ -378,7 +378,7 @@
+     """
+ 
+     snippet = f"""
+-#if defined(__CUDA_ARCH__)
++#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
+     constexpr int array_size = {array_size};
+     __shared__ uint64_t s[array_size];
+     auto ptr = &s[0];
+@@ -407,7 +407,7 @@
+     """
+ 
+     snippet = f"""
+-#if defined(__CUDA_ARCH__)
++#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
+     constexpr int array_size = WP_TILE_BLOCK_DIM +{add};
+     __shared__ int s[array_size];
+     auto ptr = &s[0];

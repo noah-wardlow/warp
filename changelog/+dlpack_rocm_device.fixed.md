@@ -1,0 +1,1 @@
+Fix `array.__dlpack_device__()` reporting `kDLCUDA` on HIP devices, which made consumers that key their backend on the DLPack device type (e.g. JAX with the ROCm plugin) reject Warp arrays. HIP device arrays now report `kDLROCM` (and pinned arrays `kDLROCMHost`), matching the device mapping already used for exported DLPack capsules.

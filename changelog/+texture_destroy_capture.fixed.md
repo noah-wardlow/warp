@@ -1,0 +1,1 @@
+Fix destroying a texture during CUDA graph capture invalidating the capture and poisoning the memory pool (CUDA error 900 followed by cascading device allocation failures). Texture teardown requested while a stream capture is active is now deferred until the capture ends, matching the deferred-free behavior of regular device allocations.

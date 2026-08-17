@@ -1,0 +1,17 @@
+--- a/newton/_src/solvers/mujoco/solver_mujoco.py
++++ b/newton/_src/solvers/mujoco/solver_mujoco.py
+@@ -2950,6 +2950,14 @@
+ 
+         if self.mjw_model is not None:
+             self.mjw_model.opt.run_collision_detection = use_mujoco_contacts
++
++            # HIP/ROCm has no conditional graph nodes (no hipGraphConditionalHandle
++            # as of ROCm 7.2). Use MuJoCo-Warp's fixed-iteration solve so the sim
++            # graph is capturable: the conditional path otherwise raises at graph
++            # capture, and on older builds ran a malfunctioning conditional loop
++            # that caused the per-frame slowdown and memory growth on gfx1151.
++            if any(getattr(d, "is_hip", False) for d in wp.get_cuda_devices()):
++                self.mjw_model.opt.graph_conditional = False
+ 
+     @event_scope
+     def _mujoco_warp_step(self):

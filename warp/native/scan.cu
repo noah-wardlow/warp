@@ -11,7 +11,13 @@
 #include <iterator>
 #include <type_traits>
 
+#if defined(__HIP_PLATFORM_AMD__)
+#include "hip_util.h"
+#include <hipcub/hipcub.hpp>
+namespace cub = hipcub;
+#else
 #include <cub/device/device_scan.cuh>
+#endif
 
 namespace {
 
@@ -97,7 +103,9 @@ void scan_device(
         check_cuda(cub::DeviceScan::ExclusiveSum(NULL, scan_temp_size, values_in_iter, values_out_iter, n, stream));
     }
 
-    void* temp_buffer = wp_alloc_device(WP_CURRENT_CONTEXT, scan_temp_size, "(native:scan)");
+    // hipCUB rejects managed memory for temp buffers.
+    // Force mempool path even on UMA devices.
+    void* temp_buffer = wp_alloc_device_async(WP_CURRENT_CONTEXT, scan_temp_size, "(native:scan)");
 
     // scan each scalar component independently
     for (int k = 0; k < type_length; ++k) {
@@ -120,7 +128,7 @@ void scan_device(
         }
     }
 
-    wp_free_device(WP_CURRENT_CONTEXT, temp_buffer);
+    wp_free_device_async(WP_CURRENT_CONTEXT, temp_buffer);
 }
 
 template <typename T> void scan_device(const T* values_in, T* values_out, int n, bool inclusive)

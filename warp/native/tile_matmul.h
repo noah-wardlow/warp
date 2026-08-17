@@ -61,16 +61,16 @@ template <int PartitionM, int PartitionN, typename Tile> struct partition_t {
     int shape[2];
 };
 
-template <typename Partition> inline int partition_size(const Partition& part) { return part.shape[0] * part.shape[1]; }
+template <typename Partition> CUDA_CALLABLE inline int partition_size(const Partition& part) { return part.shape[0] * part.shape[1]; }
 
 // returns the x, y coordinates of a tile given a linear index
-template <typename Partition> inline void partition_coord(const Partition& part, const int t, int& i, int& j)
+template <typename Partition> CUDA_CALLABLE inline void partition_coord(const Partition& part, const int t, int& i, int& j)
 {
     i = t / part.shape[1];
     j = t % part.shape[1];
 }
 
-template <typename Partition> inline auto partition_load(const Partition& tile, int i, int j)
+template <typename Partition> CUDA_CALLABLE inline auto partition_load(const Partition& tile, int i, int j)
 {
     mat_t<Partition::M, Partition::N, typename Partition::T> out;
 
@@ -89,7 +89,7 @@ template <typename Partition> inline auto partition_load(const Partition& tile, 
 }
 
 template <typename Partition, typename Value>
-inline void partition_store(const Partition& tile, int i, int j, const Value& value)
+CUDA_CALLABLE inline void partition_store(const Partition& tile, int i, int j, const Value& value)
 {
     const int tile_i = Partition::M * i;
     const int tile_j = Partition::N * j;
@@ -346,7 +346,7 @@ template <
     typename TileC,
     typename Alpha,
     typename Beta>
-TileC& tile_matmul(
+inline CUDA_CALLABLE TileC& tile_matmul(
     Fwd fun_forward, AdjA fun_backward_A, AdjB fun_backward_B, TileA& A, TileB& B, TileC& C, Alpha& alpha, Beta& beta
 )
 {
@@ -396,7 +396,7 @@ template <
     typename TileC,
     typename Alpha,
     typename Beta>
-TileC& tile_matmul_acc(
+inline CUDA_CALLABLE TileC& tile_matmul_acc(
     Fwd fun_forward, AdjA fun_backward_A, AdjB fun_backward_B, TileA& A, TileB& B, TileC& C, Alpha& alpha, Beta& beta
 )
 {
@@ -449,7 +449,7 @@ template <
     typename Beta,
     typename AdjAlpha,
     typename AdjBeta>
-void adj_tile_matmul_acc(
+inline CUDA_CALLABLE void adj_tile_matmul_acc(
     Fwd fun_forward,
     AdjA fun_backward_A,
     AdjB fun_backward_B,
@@ -529,7 +529,7 @@ template <
     typename Beta,
     typename AdjAlpha,
     typename AdjBeta>
-void adj_tile_matmul(
+inline CUDA_CALLABLE void adj_tile_matmul(
     Fwd fun_forward,
     AdjA fun_backward_A,
     AdjB fun_backward_B,

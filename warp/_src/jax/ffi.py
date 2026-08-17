@@ -71,10 +71,39 @@ def check_jax_version():
 # JAX platform identifiers are case-sensitive and intentionally use different casing.
 _FFI_PLATFORM_CPU = "cpu"
 _FFI_PLATFORM_CUDA = "CUDA"
+_FFI_PLATFORM_ROCM = "ROCM"
+
+
+def _is_rocm():
+    try:
+        return any(d.is_hip for d in wp.get_cuda_devices())
+    except Exception:
+        return False
+
+
+def _register_gpu_ffi_target(jax, name, capsule):
+    """Register a GPU FFI target, using the ROCm platform names on a ROCm stack.
+
+    The callback keeps the ``_FFI_PLATFORM_CUDA`` tag either way — Warp treats HIP
+    devices through the CUDA namespace, so the GPU code path is shared.
+    """
+    if not _is_rocm():
+        jax.ffi.register_ffi_target(name, capsule, platform=_FFI_PLATFORM_CUDA)
+        return
+    platforms = (_FFI_PLATFORM_ROCM, "rocm", _FFI_PLATFORM_CUDA)
+    registered = False
+    for platform in platforms:
+        try:
+            jax.ffi.register_ffi_target(name, capsule, platform=platform)
+            registered = True
+        except Exception:
+            continue
+    if not registered:
+        raise RuntimeError(f"Warp: failed to register JAX FFI target '{name}' for any of {platforms}")
 
 
 def _register_ffi_targets(name, callback):
-    """Register one FFI callback for CPU and CUDA without initializing either backend."""
+    """Register one FFI callback for CPU and CUDA/ROCm without initializing either backend."""
     jax = _get_jax()
     callback_type = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.POINTER(XLA_FFI_CallFrame))
     callback_funcs = {}
@@ -87,7 +116,10 @@ def _register_ffi_targets(name, callback):
         callback_func = callback_type(platform_callback)
         callback_address = ctypes.cast(callback_func, ctypes.c_void_p)
         callback_capsule = jax.ffi.pycapsule(callback_address.value)
-        jax.ffi.register_ffi_target(name, callback_capsule, platform=platform)
+        if platform == _FFI_PLATFORM_CUDA:
+            _register_gpu_ffi_target(jax, name, callback_capsule)
+        else:
+            jax.ffi.register_ffi_target(name, callback_capsule, platform=platform)
         callback_funcs[platform] = callback_func
 
     return callback_funcs
@@ -1957,7 +1989,7 @@ def register_ffi_callback(name: str, func: Callable, graph_compatible: bool = Tr
         _FFI_CALLBACK_REGISTRY[name] = callback_func
     ffi_ccall_address = ctypes.cast(callback_func, ctypes.c_void_p)
     ffi_capsule = jax.ffi.pycapsule(ffi_ccall_address.value)
-    jax.ffi.register_ffi_target(name, ffi_capsule, platform="CUDA")
+    _register_gpu_ffi_target(jax, name, ffi_capsule)
 
 
 ###############################################################################

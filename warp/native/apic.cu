@@ -176,7 +176,7 @@ APICGraph::~APICGraph()
     }
     for (auto& pair : modules) {
         if (pair.second.cuda_module) {
-            cuModuleUnload_f(pair.second.cuda_module);
+            cuModuleUnload_f((CUmodule)pair.second.cuda_module);
         }
     }
 }
@@ -254,7 +254,7 @@ static CUfunction apic_get_kernel_function(
 
     const std::string& kernel_name = is_forward ? kern_it->second.forward_name : kern_it->second.backward_name;
     CUfunction kernel;
-    CUresult err = cuModuleGetFunction_f(&kernel, mod_it->second.cuda_module, kernel_name.c_str());
+    CUresult err = cuModuleGetFunction_f(&kernel, (CUmodule)mod_it->second.cuda_module, kernel_name.c_str());
     if (err != CUDA_SUCCESS) {
         wp::set_error_string("Failed to get kernel function %s: %d", kernel_name.c_str(), err);
         return nullptr;

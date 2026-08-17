@@ -9,7 +9,7 @@
 
 namespace wp {
 
-#if defined(__CUDA_ARCH__)
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 
 struct mesh_query_aabb_thread_block_t {
     CUDA_CALLABLE mesh_query_aabb_thread_block_t()
@@ -59,7 +59,7 @@ using mesh_query_aabb_thread_block_t = mesh_query_aabb_t;
 #endif
 
 
-#if defined(__CUDA_ARCH__)
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 
 CUDA_CALLABLE inline mesh_query_aabb_thread_block_t
 mesh_query_aabb_thread_block(uint64_t id, const vec3& lower, const vec3& upper)
@@ -132,6 +132,10 @@ CUDA_CALLABLE inline int mesh_get_node_index_at_depth(
         return -1;
     }
 
+    // Defensive bounds guard (HIP/gfx1151): a garbage node index must never be
+    // dereferenced. See the guard at the caller for the rationale.
+    if (node_index < 0 || node_index >= bvh.max_nodes)
+        return -1;
     bool is_leaf = bvh_load_node(bvh.node_lowers, node_index).b;
     if (is_leaf) {
         if (lane_id == 0)
@@ -145,6 +149,8 @@ CUDA_CALLABLE inline int mesh_get_node_index_at_depth(
         int lower_upper_select = (lane_id >> bit_position) & 1;
 
         node_index = bvh_load_node(node_lowers_uppers[lower_upper_select], node_index).i;
+        if (node_index < 0 || node_index >= bvh.max_nodes)
+            return -1;
 
         is_leaf = bvh_load_node(bvh.node_lowers, node_index).b;
         if (is_leaf) {
@@ -233,6 +239,15 @@ CUDA_CALLABLE inline bool mesh_query_aabb_next_thread_block_impl(mesh_query_aabb
         }
 
         __syncthreads();
+        // Defensive bounds guard (HIP/gfx1151): on RDNA3.5 with block_dim>32 the
+        // cooperative shared-stack traversal has a nondeterministic scheduling race
+        // that can hand a thread a stale/garbage stack entry. Guarding every global
+        // dereference (node / primitive / result index) keeps an out-of-range value
+        // from being dereferenced (which would be an illegal access, error 700, that
+        // cascades across the process). A garbage index is treated as "no node/no
+        // hit" rather than crashing. CUDA is unaffected (in-range indices always).
+        if (node_index >= bvh.max_nodes)
+            node_index = -1;
         if (node_index >= 0) {
             BVHPackedNodeHalf node_lower = bvh_load_node(bvh.node_lowers, node_index);
             BVHPackedNodeHalf node_upper = bvh_load_node(bvh.node_uppers, node_index);
@@ -249,7 +264,9 @@ CUDA_CALLABLE inline bool mesh_query_aabb_next_thread_block_impl(mesh_query_aabb
                     const int start = left_index;
                     const int end = right_index;
 
-                    if (end - start == 1) {
+                    if (start < 0 || end < start || end > bvh.num_items) {
+                        // out-of-range leaf range -> skip (see guard rationale above)
+                    } else if (end - start == 1) {
                         // Optimization: when a leaf contains exactly one primitive, the node bounds
                         // are identical to the primitive bounds, so we can skip the per-primitive
                         // intersection test and directly add the result
@@ -260,7 +277,8 @@ CUDA_CALLABLE inline bool mesh_query_aabb_next_thread_block_impl(mesh_query_aabb
                     } else {
                         for (int prim_offset = 0; prim_offset < (end - start); ++prim_offset) {
                             int primitive_index = bvh.primitive_indices[start + prim_offset];
-
+                            if (primitive_index < 0 || primitive_index >= bvh.num_items)
+                                continue;
                             if (intersect_aabb_aabb(
                                     query.input_lower, query.input_upper, mesh.lowers[primitive_index],
                                     mesh.uppers[primitive_index]
@@ -289,6 +307,10 @@ CUDA_CALLABLE inline bool mesh_query_aabb_next_thread_block_impl(mesh_query_aabb
         index = query.result_buffer_shared_mem[query.result_counter_shared_mem[0] - block_size + lane_id];
     else
         index = lane_id < query.result_counter_shared_mem[0] ? query.result_buffer_shared_mem[lane_id] : -1;
+    // Defensive guard (see rationale above): the returned index feeds the caller's
+    // atomic scatter, so an out-of-range value here is an OOB write. Treat as no hit.
+    if (index >= bvh.num_items)
+        index = -1;
     bool result = query.result_counter_shared_mem[0] > 0;
     __syncthreads();
 
@@ -325,7 +347,7 @@ CUDA_CALLABLE inline bool mesh_query_aabb_next_thread_block_impl(mesh_query_aabb
 
 
 // Tile-based interface
-#if defined(__CUDA_ARCH__)
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 
 // CUDA implementation: uses thread-block parallel traversal
 template <int Length> CUDA_CALLABLE inline auto tile_mesh_query_aabb_next_impl(mesh_query_aabb_thread_block_t& query)
@@ -361,7 +383,7 @@ tile_mesh_query_aabb(uint64_t id, const vec3& lower, const vec3& upper)
 #else
 
 // CPU implementation: falls back to single-threaded query, returns index only in first element
-template <int Length> inline auto tile_mesh_query_aabb_next_impl(mesh_query_aabb_thread_block_t& query)
+template <int Length> CUDA_CALLABLE inline auto tile_mesh_query_aabb_next_impl(mesh_query_aabb_thread_block_t& query)
 {
     // On CPU, mesh_query_aabb_thread_block_t is aliased to mesh_query_aabb_t
     // We just call the regular query and put the result in the first element of a tile

@@ -4,6 +4,17 @@
 import warp
 
 
+def _get_jax_gpu_devices(jax):
+    for platform in ("cuda", "rocm", "gpu"):
+        try:
+            devices = jax.devices(platform)
+        except Exception:
+            devices = []
+        if devices:
+            return devices
+    return []
+
+
 def device_to_jax(warp_device: warp.DeviceLike):
     """Return the Jax device corresponding to a Warp device.
 
@@ -18,10 +29,10 @@ def device_to_jax(warp_device: warp.DeviceLike):
     d = warp.get_device(warp_device)
 
     if d.is_cuda:
-        cuda_devices = jax.devices("cuda")
-        if d.ordinal >= len(cuda_devices):
+        gpu_devices = _get_jax_gpu_devices(jax)
+        if d.ordinal >= len(gpu_devices):
             raise RuntimeError(f"Jax device corresponding to '{warp_device}' is not available")
-        return cuda_devices[d.ordinal]
+        return gpu_devices[d.ordinal]
     else:
         cpu_devices = jax.devices("cpu")
         if not cpu_devices:
@@ -40,7 +51,7 @@ def device_from_jax(jax_device) -> warp._src.context.Device:
     """
     if jax_device.platform == "cpu":
         return warp.get_device("cpu")
-    elif jax_device.platform == "gpu":
+    elif jax_device.platform in ("gpu", "cuda", "rocm"):
         return warp.get_cuda_device(jax_device.id)
     else:
         raise RuntimeError(f"Unsupported Jax device platform '{jax_device.platform}'")

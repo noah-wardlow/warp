@@ -4,6 +4,10 @@
 #include "warp.h"
 
 #include "scan.h"
+#include <cstddef>
+extern "C" void* wp_alloc_host(size_t s, const char* tag);
+extern "C" void wp_free_host(void* ptr);
+extern "C" bool wp_memcpy_h2h(void* dst, void* src, size_t n);
 
 template <typename T>
 void scan_host(

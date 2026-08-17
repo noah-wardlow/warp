@@ -1,0 +1,1 @@
+Add `wp.ReadbackBuffer` and `warp.array.numpy_view()` for zero-copy GPU-to-CPU readback on unified-memory (APU/iGPU) devices, avoiding the device-to-host copy that `numpy()` performs. Falls back to a normal copying readback on non-unified devices.

@@ -3222,6 +3222,11 @@ class ModuleBuilder:
         # to skip compiling bfloat16 overloads in builtin.h (significant LLVM speedup).
         type_defines = "" if "bfloat16" in source else "#define WP_NO_BFLOAT16\n"
 
+        # Select the hardware float atomic on HIP. Inert on CUDA and the CPU:
+        # builtin.h gates the define on __HIP_DEVICE_COMPILE__.
+        if self.options.get("hip_fast_fp_atomics"):
+            type_defines += "#define WP_HIP_FAST_FP_ATOMICS 1\n"
+
         # add headers
         if device == "cpu":
             source = (
@@ -3531,6 +3536,7 @@ class Module:
             "enable_mathdx_fft": None,
             "fast_math": False,
             "fuse_fp": True,
+            "hip_fast_fp_atomics": warp.config.hip_fast_fp_atomics,
             "lineinfo": warp.config.lineinfo,
             "cuda_output": None,  # supported values: "ptx", "cubin", or None (automatic)
             "mode": None,
@@ -3918,7 +3924,7 @@ class Module:
 
         return module_name_short
 
-    def _get_compile_arch(self, device: Device | None = None) -> int | None:
+    def _get_compile_arch(self, device: Device | None = None) -> int | str | None:
         if device is None:
             device = runtime.get_device()
 
@@ -3927,7 +3933,7 @@ class Module:
     def _get_compile_output_name(
         self,
         device: Device | None,
-        output_arch: int | None = None,
+        output_arch: int | str | None = None,
         arch_suffix: str = "",
         use_ptx: bool | None = None,
         block_dim: int | None = None,
@@ -3972,7 +3978,7 @@ class Module:
                 use_ptx = self._use_ptx(device)
             else:
                 init()
-                use_ptx = final_arch not in runtime.nvrtc_supported_archs
+                use_ptx = isinstance(final_arch, int) and final_arch not in runtime.nvrtc_supported_archs
 
         # Resolve the arch suffix if the caller passed an empty string
         if not arch_suffix:
@@ -3981,10 +3987,20 @@ class Module:
             else:
                 arch_suffix = ""
 
-        if use_ptx:
-            output_name = f"{module_name_short}.sm{final_arch}{arch_suffix}.ptx"
+        if isinstance(final_arch, str):
+            if final_arch.startswith("sm_"):
+                arch_label = f"sm{final_arch[3:]}{arch_suffix}"
+            elif final_arch.startswith("compute_"):
+                arch_label = f"compute{final_arch[8:]}{arch_suffix}"
+            else:
+                arch_label = final_arch
         else:
-            output_name = f"{module_name_short}.sm{final_arch}{arch_suffix}.cubin"
+            arch_label = f"sm{final_arch}{arch_suffix}"
+
+        if use_ptx:
+            output_name = f"{module_name_short}.{arch_label}.ptx"
+        else:
+            output_name = f"{module_name_short}.{arch_label}.cubin"
 
         return output_name
 
@@ -4042,7 +4058,7 @@ class Module:
         device: Device | None = None,
         output_dir: str | os.PathLike | None = None,
         output_name: str | None = None,
-        output_arch: int | None = None,
+        output_arch: int | str | None = None,
         use_ptx: bool | None = None,
         options: dict | None = None,
     ) -> bool:
@@ -4078,7 +4094,10 @@ class Module:
 
         # Reject cluster_dim > 1 when the compile target drops the cluster
         # attribute (status == "dropped"); see _cluster_dim_target_status.
-        if not is_cpu and output_arch < 90:
+        # Thread-block clusters are a CUDA (sm_90+) feature: output_arch is an int
+        # compute capability there. On HIP it is a gfx string ("gfx1151"), which has
+        # no clusters, so skip the check rather than comparing a str against 90.
+        if not is_cpu and isinstance(output_arch, int) and output_arch < 90:
             device_arch = device.arch if device is not None else None
             if _cluster_dim_target_status(device_arch, output_arch) == "dropped":
                 # Validate the same live unique-kernel set that codegen emits.
@@ -4106,8 +4125,14 @@ class Module:
         # module-level default in ``self.options["block_dim"]``.
         active_block_dim = options["block_dim"]
 
-        # Resolve the arch suffix once for both the output filename and the build call
-        if not is_cpu:
+        # Resolve the arch suffix once for both the output filename and the build call.
+        # HIP devices report a gfx arch string rather than an int SM level, so
+        # resolve their suffix directly from the device instead of the CUDA
+        # validation path.
+        if not is_cpu and device is not None and device.is_hip:
+            init()
+            arch_suffix = device._get_cuda_arch_suffix(output_arch)
+        elif not is_cpu:
             init()
             arch_suffix = _validate_cuda_arch_suffix(
                 output_arch,
@@ -4170,7 +4195,14 @@ class Module:
             # Default to O2 for CPU, O3 for CUDA
             opt = 2 if is_cpu else 3
 
-        if opt != 3 and not is_cpu and runtime.toolkit_version is not None and runtime.toolkit_version < (12, 9):
+        is_hip = device is not None and device.is_hip
+        if (
+            opt != 3
+            and not is_cpu
+            and not is_hip
+            and runtime.toolkit_version is not None
+            and runtime.toolkit_version < (12, 9)
+        ):
             log_warning("Optimization level other than 3 has no effect on CUDA versions prior to 12.9.", once=True)
 
         source_code_path = os.path.join(build_dir, f"{module_name_short}.{source_code_ext}")
@@ -4308,7 +4340,7 @@ class Module:
         device,
         block_dim: int | None = None,
         binary_path: os.PathLike | None = None,
-        output_arch: int | None = None,
+        output_arch: int | str | None = None,
         meta_path: os.PathLike | None = None,
     ) -> ModuleExec | None:
         device = runtime.get_device(device)
@@ -4661,6 +4693,22 @@ class CudaDefaultAllocator:
         self.device = device
 
     def allocate(self, size_in_bytes):
+        # On HIP/ROCm, attempting a synchronous device allocation during graph capture
+        # invalidates the capture, and hipStreamEndCapture then cannot transition the
+        # stream out of capture mode (it returns error 900), poisoning the context for
+        # every subsequent operation on the device. Since the default (synchronous)
+        # allocator can never satisfy an allocation during capture anyway, refuse it up
+        # front so the capture stays valid and can be ended cleanly. On CUDA the failed
+        # allocation does not poison the context, so the lower-overhead post-failure
+        # check below is kept there.
+        if runtime.is_hip and runtime.captures and self.device.is_capturing:
+            raise RuntimeError(
+                f"Failed to allocate {size_in_bytes} bytes on device '{self.device}':  "
+                f"Cannot allocate memory during graph capture with the default allocator on device "
+                f"'{self.device}'.  Pre-allocate before capture begins, or enable memory pools "
+                f"(wp.set_mempool_enabled('{self.device}', True))."
+            )
+
         ptr = runtime.core.wp_alloc_device_default(self.device.context, size_in_bytes, None)
         # If the allocation fails, check if graph capture is active to raise an informative error.
         # We delay the capture check to avoid overhead.
@@ -4685,6 +4733,78 @@ class CudaDefaultAllocator:
 
     def deallocate(self, ptr, size_in_bytes):
         runtime.core.wp_free_device_default(self.device.context, ptr)
+
+
+class CudaUmaHybridAllocator:
+    """Hybrid allocator for Unified Memory Architecture (APU/iGPU) devices.
+
+    Large allocations (>= 64KB) use hipMallocManaged for zero-copy CPU/GPU access.
+    Small allocations use the mempool (hipMallocAsync) for fast alloc/free.
+
+    This eliminates redundant SDMA transfers on APUs where CPU and GPU
+    share the same physical DRAM, while keeping allocation overhead low
+    for the many small transient buffers typical in simulation workloads.
+    """
+
+    MANAGED_THRESHOLD = 65536  # 64 KB
+
+    deallocate_requires_context_guard = True
+    memory_kind = MemoryKind.CUDA_DEVICE
+
+    def __init__(self, device):
+        self.device = device
+        self._managed_ptrs = set()
+        self._pool_alloc = CudaMempoolAllocator(device)
+        # Load HIP for managed allocation
+        import ctypes
+
+        try:
+            self._hip = ctypes.CDLL("/opt/rocm/lib/libamdhip64.so")
+        except OSError:
+            self._hip = None
+
+    def allocate(self, size_in_bytes):
+        # The synchronous managed allocation (hipMallocManaged) would invalidate an
+        # in-progress graph capture on HIP the same way the default allocator does
+        # (see CudaDefaultAllocator.allocate), poisoning the context. While a capture is
+        # active, fall through to the capture-safe mempool path instead so allocations
+        # still work. (runtime.captures is checked first to skip the per-alloc capture
+        # query when no capture is in progress.)
+        if size_in_bytes >= self.MANAGED_THRESHOLD and not (runtime.captures and self.device.is_capturing):
+            # Use C-side allocation so warp.so's HIP runtime owns the alloc.
+            # Python ctypes hipMallocManaged registers in a separate runtime instance,
+            # making cudaPointerGetAttributes return type=Unregistered inside warp.so.
+            ptr = runtime.core.wp_alloc_managed_device(self.device.context, size_in_bytes)
+            if ptr:
+                # Coarse-grained, so the hardware float atomic works on this range.
+                # Managed memory is host-coherent by default, and HIP's hardware
+                # float atomic silently discards every update to such memory.
+                # Coarse-grained managed memory stays host-readable once the device
+                # is synchronized, which is what the readback path does.
+                if not runtime.core.wp_cuda_set_memory_coarse_grain(self.device.context, ptr, size_in_bytes):
+                    # Left fine-grained, so a float32 atomic into this array would
+                    # be discarded outright if hip_fast_fp_atomics were enabled.
+                    # Silence here would reproduce exactly the fault this avoids.
+                    log_warning(
+                        f"Failed to mark a {size_in_bytes}-byte managed allocation coarse-grained on device "
+                        f"'{self.device}'. Float32 atomics into it are silently discarded while "
+                        f"warp.config.hip_fast_fp_atomics is enabled.",
+                        once=True,
+                    )
+                self._managed_ptrs.add(ptr)
+                return ptr
+        # Fallback to mempool for small allocs, during graph capture, or if managed fails
+        return self._pool_alloc.allocate(size_in_bytes)
+
+    def deallocate(self, ptr, size_in_bytes):
+        if ptr in self._managed_ptrs:
+            self._managed_ptrs.discard(ptr)
+            runtime.core.wp_free_managed_device(self.device.context, ptr)
+        else:
+            self._pool_alloc.deallocate(ptr, size_in_bytes)
+
+    def is_managed(self, ptr):
+        return ptr in self._managed_ptrs
 
 
 class CudaMempoolAllocator:
@@ -4761,6 +4881,51 @@ class CudaManagedAllocator:
         # cudaFree() is valid for cudaMallocManaged() allocations, so managed
         # deallocation can use the same native path as default CUDA allocations.
         runtime.core.wp_free_device_default(None, ptr)
+
+
+class CudaHipCaptureAwareAllocator:
+    """Capture-aware allocator for HIP/ROCm (gfx1151).
+
+    ROCm's async memory pool (hipMallocAsync) recycles a freed block for a new
+    allocation before the free has actually completed, aliasing still-in-use
+    memory under allocation churn (silent corruption; disabling reuse
+    attributes and fixing the free stream do not resolve it — it is a driver
+    issue). So for regular allocations we use the plain synchronous allocator,
+    which is correct.
+
+    Allocations made DURING graph capture must still come from the pool, because
+    plain allocations are not capturable — but those are safe: they become graph
+    allocation nodes whose frees are ordered against the graph's leaf nodes.
+    We therefore route only capture-time allocations through the pool and track
+    them so free() can dispatch to the matching path.
+    """
+
+    deallocate_requires_context_guard = True
+    memory_kind = MemoryKind.CUDA_DEVICE
+
+    def __init__(self, device):
+        assert device.is_cuda
+        self.device = device
+        self._default = CudaDefaultAllocator(device)
+        self._pool = CudaMempoolAllocator(device)
+        self._pool_ptrs = set()
+
+    def allocate(self, size_in_bytes):
+        if self.device.is_capturing:
+            ptr = self._pool.allocate(size_in_bytes)
+            self._pool_ptrs.add(ptr)
+            return ptr
+        return self._default.allocate(size_in_bytes)
+
+    def deallocate(self, ptr, size_in_bytes):
+        if ptr in self._pool_ptrs:
+            self._pool_ptrs.discard(ptr)
+            self._pool.deallocate(ptr, size_in_bytes)
+        else:
+            self._default.deallocate(ptr, size_in_bytes)
+
+    def is_managed(self, ptr):
+        return False
 
 
 class ContextGuard:
@@ -5090,8 +5255,9 @@ class Device:
         ordinal (int): A Warp-specific label for the device. ``-1`` for CPU devices.
         name (str): A label for the device. By default, CPU devices will be named according to the processor name,
             or ``"CPU"`` if the processor name cannot be determined.
-        arch (int): The compute capability version number calculated as ``10 * major + minor``.
-            ``0`` for CPU devices.
+        arch (int): The CUDA compute capability version number calculated as ``10 * major + minor``.
+            ``0`` for CPU devices or non-CUDA architectures.
+        arch_str (str): The architecture string reported by the runtime (e.g., ``"sm_86"`` or ``"gfx942"``).
         sm_count (int): The number of streaming multiprocessors on the CUDA device.
             ``0`` for CPU devices.
         max_shared_memory_per_block (int): The device's opt-in maximum shared memory per block
@@ -5158,9 +5324,11 @@ class Device:
             # CPU device
             self.name = platform.processor() or "CPU"
             self.arch = 0
+            self.arch_str = ""
             self.sm_count = 0
             self.max_shared_memory_per_block = 0
             self.is_uva = False
+            self.is_uma = False
             self.is_cpu_memory_access_from_gpu_supported = False
             self.is_gpu_memory_access_from_cpu_supported = False
             self.is_cpu_gpu_atomic_supported = False
@@ -5183,10 +5351,20 @@ class Device:
         elif ordinal >= 0 and ordinal < runtime.core.wp_cuda_device_get_count():
             # CUDA device
             self.name = runtime.core.wp_cuda_device_get_name(ordinal).decode()
-            self.arch = runtime.core.wp_cuda_device_get_arch(ordinal)
+            arch_bytes = runtime.core.wp_cuda_device_get_arch(ordinal)
+            arch_str = arch_bytes.decode() if arch_bytes else ""
+            self.arch_str = arch_str
+            if arch_str.startswith("sm_") or arch_str.startswith("compute_"):
+                try:
+                    self.arch = int(arch_str.split("_", 1)[1])
+                except (ValueError, IndexError):
+                    self.arch = 0
+            else:
+                self.arch = 0
             self.sm_count = runtime.core.wp_cuda_device_get_sm_count(ordinal)
             self.max_shared_memory_per_block = runtime.core.wp_cuda_device_get_max_shared_memory(ordinal)
             self.is_uva = runtime.core.wp_cuda_device_is_uva(ordinal) > 0
+            self.is_uma = runtime.core.wp_cuda_device_is_uma(ordinal) > 0
             self.is_cpu_memory_access_from_gpu_supported = (
                 runtime.core.wp_cuda_device_get_pageable_memory_access(ordinal) > 0
             )
@@ -5208,6 +5386,7 @@ class Device:
             if warp.config.enable_mempools_at_init:
                 # enable if supported
                 self.is_mempool_enabled = self.is_mempool_supported
+
             else:
                 # disable by default
                 self.is_mempool_enabled = False
@@ -5230,15 +5409,40 @@ class Device:
                 self.mempool_allocator = None
 
             # set current allocator
-            if self.is_mempool_enabled:
+            if self.is_mempool_enabled and self.is_hip:
+                # gfx1151/ROCm: the async pool aliases in-use memory for regular
+                # allocations (driver bug). Use plain alloc normally, pool only
+                # during graph capture. Opt out with WARP_HIP_USE_ASYNC_POOL=1.
+                if os.environ.get("WARP_HIP_USE_ASYNC_POOL") == "1":
+                    self.current_allocator = self.mempool_allocator
+                else:
+                    self.current_allocator = CudaHipCaptureAwareAllocator(self)
+            elif self.is_mempool_enabled:
                 self.current_allocator = self.mempool_allocator
             else:
                 self.current_allocator = self.default_allocator
 
             self._custom_allocator = None
 
-            # check whether our NVRTC can generate CUBINs for this architecture
-            self.is_cubin_supported = self.arch in runtime.nvrtc_supported_archs
+            # UMA hybrid allocator (managed memory for allocations >= 64KB):
+            # OPT-IN ONLY via WARP_ENABLE_UMA_HYBRID=1. Two reasons it is not
+            # the default:
+            # 1. Performance: hipMallocManaged-backed buffers are ~5x slower
+            #    for bandwidth-bound kernels at large batch sizes on gfx1151
+            #    (measured: mujoco-warp humanoid at 1024 worlds, 18.0 ms/step
+            #    with the hybrid allocator vs 3.7 ms/step with the mempool).
+            #    Small-batch, latency-bound workloads are unaffected because
+            #    their buffers stay below the 64KB managed threshold.
+            # 2. Stability: interleaved managed allocations during Newton's URDF
+            #    loading can surface stale HIP errors in wp_memset_device.
+            if self.is_uma and os.environ.get("WARP_ENABLE_UMA_HYBRID") == "1":
+                self.current_allocator = CudaUmaHybridAllocator(self)
+
+            # check whether our NVRTC/HIPRTC can generate device code for this architecture
+            if self.is_hip:
+                self.is_cubin_supported = True
+            else:
+                self.is_cubin_supported = self.arch in runtime.nvrtc_supported_archs
 
             # initialize streams unless context acquisition is postponed
             if self._context is not None:
@@ -5295,6 +5499,11 @@ class Device:
     def is_cuda(self) -> bool:
         """A boolean indicating whether the device is a CUDA device."""
         return self.ordinal >= 0
+
+    @property
+    def is_hip(self) -> bool:
+        """A boolean indicating whether the device is a HIP device."""
+        return self.is_cuda and self.arch_str.startswith("gfx")
 
     @property
     def is_capturing(self) -> bool:
@@ -5512,6 +5721,10 @@ class Device:
             # CPU devices don't use CUDA compilation
             return None
 
+        if self.is_hip:
+            # HIP does not support PTX output
+            return "cubin"
+
         if not self.is_cubin_supported:
             return "ptx"
 
@@ -5537,8 +5750,8 @@ class Device:
             else "cubin"
         )
 
-    def get_cuda_compile_arch(self) -> int | None:
-        """Get the CUDA architecture to use when compiling code for this device.
+    def get_cuda_compile_arch(self) -> int | str | None:
+        """Get the CUDA/HIP architecture to use when compiling code for this device.
 
         This method is intended for internal use by Warp's compilation system.
         External users should not need to call this method directly.
@@ -5558,6 +5771,13 @@ class Device:
         if self.is_cpu:
             return None
 
+        if self.is_hip:
+            # HIP path uses arch=0 sentinel; the gfx string is passed via arch_suffix.
+            # See _get_cuda_arch_suffix() which returns self.arch_str for HIP devices,
+            # and wp_cuda_compile_program in warp.cu which dispatches on
+            # (arch == 0 && arch_suffix starts with "gfx") to the HIP code path.
+            return 0
+
         if self.get_cuda_output_format() == "ptx":
             # use the default PTX arch if the device supports it
             if warp.config.ptx_target_arch is not None:
@@ -5569,8 +5789,15 @@ class Device:
 
         return output_arch
 
-    def _get_cuda_arch_suffix(self, output_arch: int) -> str:
-        """Return the validated arch suffix for this device."""
+    def _get_cuda_arch_suffix(self, output_arch: int | str) -> str:
+        """Return the validated arch suffix for this device.
+
+        For HIP devices, returns the gfx architecture string itself, which
+        wp_cuda_compile_program uses directly (with arch=0 as the int sentinel).
+        For CUDA devices, returns the normal 'a' or 'f' suffix (or empty).
+        """
+        if self.is_hip:
+            return self.arch_str
         return _validate_cuda_arch_suffix(
             output_arch,
             device_arch=self.arch,
@@ -6006,6 +6233,10 @@ class Runtime:
             self.core.wp_alloc_device_async.restype = ctypes.c_void_p
             self.core.wp_alloc_device_managed.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_char_p]
             self.core.wp_alloc_device_managed.restype = ctypes.c_void_p
+            self.core.wp_alloc_managed_device.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+            self.core.wp_alloc_managed_device.restype = ctypes.c_void_p
+            self.core.wp_free_managed_device.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+            self.core.wp_free_managed_device.restype = None
 
             self.core.wp_float_to_half_bits.argtypes = [ctypes.c_float]
             self.core.wp_float_to_half_bits.restype = ctypes.c_uint16
@@ -7078,6 +7309,7 @@ class Runtime:
             self.core.wp_texture_copy_device.argtypes = [
                 ctypes.c_void_p,  # context
                 ctypes.c_uint,  # width_bytes
+                ctypes.c_uint,  # width_texels
                 ctypes.c_uint,  # height
                 ctypes.c_uint,  # depth
                 ctypes.c_int,  # dst_memory_type
@@ -7187,13 +7419,15 @@ class Runtime:
             self.core.wp_cuda_device_get_name.argtypes = [ctypes.c_int]
             self.core.wp_cuda_device_get_name.restype = ctypes.c_char_p
             self.core.wp_cuda_device_get_arch.argtypes = [ctypes.c_int]
-            self.core.wp_cuda_device_get_arch.restype = ctypes.c_int
+            self.core.wp_cuda_device_get_arch.restype = ctypes.c_char_p
             self.core.wp_cuda_device_get_sm_count.argtypes = [ctypes.c_int]
             self.core.wp_cuda_device_get_sm_count.restype = ctypes.c_int
             self.core.wp_cuda_device_get_max_shared_memory.argtypes = [ctypes.c_int]
             self.core.wp_cuda_device_get_max_shared_memory.restype = ctypes.c_int
             self.core.wp_cuda_device_is_uva.argtypes = [ctypes.c_int]
             self.core.wp_cuda_device_is_uva.restype = ctypes.c_int
+            self.core.wp_cuda_device_is_uma.argtypes = [ctypes.c_int]
+            self.core.wp_cuda_device_is_uma.restype = ctypes.c_int
             self.core.wp_cuda_device_get_pageable_memory_access.argtypes = [ctypes.c_int]
             self.core.wp_cuda_device_get_pageable_memory_access.restype = ctypes.c_int
             self.core.wp_cuda_device_get_direct_managed_mem_access_from_host.argtypes = [ctypes.c_int]
@@ -7206,6 +7440,8 @@ class Runtime:
             self.core.wp_cuda_device_get_concurrent_managed_access_supported.restype = ctypes.c_int
             self.core.wp_cuda_pointer_get_memory_kind.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
             self.core.wp_cuda_pointer_get_memory_kind.restype = ctypes.c_int
+            self.core.wp_cuda_set_memory_coarse_grain.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t]
+            self.core.wp_cuda_set_memory_coarse_grain.restype = ctypes.c_int
             self.core.wp_cuda_device_is_mempool_supported.argtypes = [ctypes.c_int]
             self.core.wp_cuda_device_is_mempool_supported.restype = ctypes.c_int
             self.core.wp_cuda_device_is_ipc_supported.argtypes = [ctypes.c_int]
@@ -7498,7 +7734,7 @@ class Runtime:
                 ctypes.c_bool,  # compile_time_trace
                 ctypes.c_bool,  # precompiled_headers
                 ctypes.c_char_p,  # output_path
-                ctypes.c_char_p,  # kernel_cache_dir
+                ctypes.c_char_p,  # pch_dir
                 ctypes.c_size_t,  # num_ltoirs
                 ctypes.POINTER(ctypes.c_char_p),  # ltoirs
                 ctypes.POINTER(ctypes.c_size_t),  # ltoir_sizes
@@ -7735,7 +7971,9 @@ class Runtime:
         self.is_cuda_compatibility_enabled = bool(self.core.wp_is_cuda_compatibility_enabled())
 
         self.toolkit_version = None  # CTK version used to build the core lib
+        self.toolkit_version_raw = None  # raw toolkit version from the runtime
         self.driver_version = None  # installed driver version
+        self.driver_version_raw = None  # raw driver version from the runtime
         self.min_driver_version = None  # minimum required driver version
 
         self._pch_dirs: dict[int, tempfile.TemporaryDirectory] = {}
@@ -7743,6 +7981,7 @@ class Runtime:
 
         self.cuda_devices = []
         self.cuda_primary_devices = []
+        self.is_hip = False
         self.cuda_peer_access_enabled = {}
         self.cuda_mempool_access_enabled = {}
         self.nvrtc_supported_archs = set()
@@ -7752,11 +7991,13 @@ class Runtime:
         if self.is_cuda_enabled:
             # get CUDA Toolkit and driver versions
             toolkit_version = self.core.wp_cuda_toolkit_version()
+            self.toolkit_version_raw = toolkit_version
             self.toolkit_version = (toolkit_version // 1000, (toolkit_version % 1000) // 10)
 
             if self.core.wp_cuda_driver_is_initialized():
                 # save versions as tuples, e.g., (12, 4)
                 driver_version = self.core.wp_cuda_driver_version()
+                self.driver_version_raw = driver_version
                 self.driver_version = (driver_version // 1000, (driver_version % 1000) // 10)
             else:
                 self.driver_version = None
@@ -7771,6 +8012,12 @@ class Runtime:
             else:
                 # we can't rely on minor version compatibility, so the driver can't be older than the toolkit
                 self.min_driver_version = self.toolkit_version
+
+            # gfx1151 port: HIP packed versions (ROCm) have major >= 1000 and
+            # don't follow CUDA's minor-compatibility semantics. Accept any
+            # reported driver — if the HIP runtime loaded, it's functional.
+            if self.toolkit_version is not None and self.toolkit_version[0] >= 1000:
+                self.min_driver_version = (0, 0)
 
             # NVRTC is statically linked — arch query works without a driver
             num_archs = self.core.wp_nvrtc_supported_arch_count()
@@ -7807,20 +8054,25 @@ class Runtime:
             else:
                 self.set_default_device("cuda:0")
 
-            # the minimum PTX architecture that supports all of Warp's features
-            self.default_ptx_arch = 75
+            self.is_hip = any(d.is_hip for d in self.cuda_devices)
 
-            # Update the default PTX architecture based on devices present in the system.
-            # Use the lowest architecture among devices that meet the minimum architecture requirement.
-            # Devices below the required minimum will use the highest architecture they support.
-            try:
-                self.default_ptx_arch = min(
-                    d.arch
-                    for d in self.cuda_devices
-                    if d.arch >= self.default_ptx_arch and d.arch in self.nvrtc_supported_archs
-                )
-            except ValueError:
-                pass  # no eligible NVRTC-supported arch ≥ default, retain existing
+            if self.is_hip:
+                self.default_ptx_arch = None
+            else:
+                # the minimum PTX architecture that supports all of Warp's features
+                self.default_ptx_arch = 75
+
+                # Update the default PTX architecture based on devices present in the system.
+                # Use the lowest architecture among devices that meet the minimum architecture requirement.
+                # Devices below the required minimum will use the highest architecture they support.
+                try:
+                    self.default_ptx_arch = min(
+                        d.arch
+                        for d in self.cuda_devices
+                        if d.arch >= self.default_ptx_arch and d.arch in self.nvrtc_supported_archs
+                    )
+                except ValueError:
+                    pass  # no eligible NVRTC-supported arch ≥ default, retain existing
         else:
             self.set_default_device("cpu")
             if self.nvrtc_supported_archs:
@@ -7846,10 +8098,18 @@ class Runtime:
                 greeting.append(f"   Git commit: {warp.config._git_commit_hash}")
 
             if cuda_device_count > 0:
-                # print CUDA version info
-                greeting.append(
-                    f"   CUDA Toolkit {self.toolkit_version[0]}.{self.toolkit_version[1]}, Driver {self.driver_version[0]}.{self.driver_version[1]}"
-                )
+                # print CUDA/ROCm version info
+                if self.is_hip:
+                    toolkit_str = self._format_rocm_version(self.toolkit_version_raw)
+                    driver_str = self._format_rocm_version(self.driver_version_raw)
+                    if driver_str != "unknown":
+                        greeting.append(f"   ROCm {toolkit_str}, HIP driver {driver_str}")
+                    else:
+                        greeting.append(f"   ROCm {toolkit_str}")
+                else:
+                    greeting.append(
+                        f"   CUDA Toolkit {self.toolkit_version[0]}.{self.toolkit_version[1]}, Driver {self.driver_version[0]}.{self.driver_version[1]}"
+                    )
             else:
                 # briefly explain lack of CUDA devices
                 if not self.is_cuda_enabled:
@@ -7880,7 +8140,7 @@ class Runtime:
                 alias_str = f'"{cuda_device.alias}"'
                 if cuda_device.is_primary:
                     name_str = f'"{cuda_device.name}"'
-                    arch_str = f"sm_{cuda_device.arch}"
+                    arch_str = cuda_device.arch_str or f"sm_{cuda_device.arch}"
                     mem_str = f"{cuda_device.total_memory / 1024 / 1024 / 1024:.0f} GiB"
                     if cuda_device.is_mempool_supported:
                         if cuda_device.is_mempool_enabled:
@@ -8005,6 +8265,21 @@ class Runtime:
 
     def get_error_string(self):
         return self.core.wp_get_error_string().decode("utf-8")
+
+    @staticmethod
+    def _format_rocm_version(version: int | None) -> str:
+        if not version:
+            return "unknown"
+        if version >= 10000000:
+            major = version // 10000000
+            minor = (version // 100000) % 100
+            patch = version % 100000
+            if patch and patch < 1000:
+                return f"{major}.{minor}.{patch}"
+            return f"{major}.{minor}"
+        major = version // 1000
+        minor = (version % 1000) // 10
+        return f"{major}.{minor}"
 
     def get_warp_version(self) -> str:
         """Get the version of the Warp core library.
@@ -8321,23 +8596,25 @@ def is_cubql_available() -> bool:
     return bool(runtime.core.wp_is_cubql_enabled())
 
 
-def get_cuda_supported_archs() -> list[int]:
-    """Return a sorted list of CUDA compute architectures that can be used as compilation targets.
+def get_cuda_supported_archs() -> list[int | str]:
+    """Return a sorted list of CUDA/HIP architectures that can be used as compilation targets.
 
-    The returned architectures represent the compute capabilities that Warp's NVRTC compiler
-    can generate code for. These values correspond to CUDA compute capability versions
-    (e.g., 75 for ``sm_75``, 80 for ``sm_80``, 90 for ``sm_90``).
+    For CUDA, this returns compute capability integers (e.g., 75 for ``sm_75``).
+    For HIP, this returns architecture strings (e.g., ``"gfx942"``) for available devices.
 
     Returns:
-        A sorted list of architecture values from lowest to highest, or an empty list
-        if CUDA is not available or no architectures are supported.
+        A sorted list of architectures, or an empty list if CUDA/HIP is not available.
     """
     init()
 
-    if runtime.is_cuda_enabled:
-        return sorted(runtime.nvrtc_supported_archs)
-    else:
+    if not runtime.is_cuda_enabled:
         return []
+
+    if any(d.is_hip for d in runtime.cuda_devices):
+        archs = [d.arch_str for d in runtime.cuda_devices if d.arch_str]
+        return sorted(set(archs))
+
+    return sorted(runtime.nvrtc_supported_archs)
 
 
 def get_devices() -> list[Device]:
@@ -11923,7 +12200,7 @@ def _resolve_module(module: Module | types.ModuleType | str) -> Module:
 def compile_aot_module(
     module: Module | types.ModuleType | str,
     device: Device | str | list[Device] | list[str] | None = None,
-    arch: int | Iterable[int] | None = None,
+    arch: int | str | Iterable[int | str] | None = None,
     module_dir: str | os.PathLike | None = None,
     use_ptx: bool | None = None,
     strip_hash: bool | None = None,
@@ -12062,7 +12339,7 @@ def compile_aot_module(
 def load_aot_module(
     module: Module | types.ModuleType | str,
     device: Device | str | list[Device] | list[str] | None = None,
-    arch: int | None = None,
+    arch: int | str | None = None,
     module_dir: str | os.PathLike | None = None,
     use_ptx: bool | None = None,
     strip_hash: bool | None = None,
@@ -12133,7 +12410,7 @@ def load_aot_module(
         # Determine candidate binaries to try
         tried_paths = []
         binary_path = None
-        if d.is_cuda and use_ptx is None:
+        if d.is_cuda and use_ptx is None and not d.is_hip:
             candidate_flags = (True, False)  # try PTX first, then CUBIN
         else:
             candidate_flags = (use_ptx,)
@@ -12445,6 +12722,13 @@ def capture_end(device: DeviceLike = None, stream: Stream | None = None) -> Grap
         runtime._apic_capture = None
         runtime._apic_graph = None
 
+    # The native capture on this stream has ended (successfully or not);
+    # release any texture handles whose destruction was deferred while the
+    # capture was active (see warp._src.texture._deferred_destroys).
+    from warp._src import texture  # noqa: PLC0415 (circular import)
+
+    texture._flush_deferred_destroys()
+
     if not result:
         # A concrete error should've already been reported, so we don't need to go into details here
         raise RuntimeError(f"CUDA graph capture failed. {runtime.get_error_string()}")
@@ -12472,6 +12756,11 @@ def assert_conditional_graph_support():
     if runtime is None:
         init()
 
+    # HIP/ROCm does not support conditional graph nodes (no
+    # hipGraphConditionalHandle API as of ROCm 7.2)
+    if runtime.is_hip:
+        raise RuntimeError("Conditional graph nodes are not supported on HIP/ROCm")
+
     if runtime.toolkit_version is None or runtime.toolkit_version < (12, 4):
         raise RuntimeError("Warp must be built with CUDA Toolkit 12.4+ to enable conditional graph nodes")
 
@@ -12492,6 +12781,14 @@ def is_conditional_graph_supported() -> bool:
     """
     if runtime is None:
         init()
+
+    # HIP/ROCm has no conditional graph node API (no hipGraphConditionalHandle
+    # as of ROCm 7.2). The version check below is meaningless on HIP: the ROCm
+    # version parses as e.g. (70253, 21) >= (12, 4), which made this return
+    # True and sent callers (e.g. Newton's implicit MPM solver) down the
+    # capture_while path, where assert_conditional_graph_support then raised.
+    if runtime.is_hip:
+        return False
 
     return (
         runtime.toolkit_version is not None

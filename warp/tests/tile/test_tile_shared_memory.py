@@ -65,6 +65,13 @@ def test_tile_shared_mem_large(test, device):
 
     BLOCK_DIM = 256
 
+    # This kernel needs the full 64 KB (65536 bytes) of shared memory plus the
+    # tile framework's own overhead. gfx1151's LDS is exactly 64 KB (a hard
+    # limit, not raisable like sm_75+ opt-in to 100+ KB), so the launch would
+    # overflow LDS and fault. Skip where 64 KB + overhead does not fit.
+    if device.is_cuda and device.max_shared_memory_per_block < 66 * 1024:
+        test.skipTest("kernel needs 64 KB + overhead of shared memory (exceeds gfx1151 64 KB LDS)")
+
     # we disable backward kernel gen since 128k is not supported on most architectures
     @wp.kernel(enable_backward=False, module="unique")
     def compute(out: wp.array2d[float]):

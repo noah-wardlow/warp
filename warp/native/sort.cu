@@ -15,7 +15,13 @@
 #include <mutex>
 #include <unordered_map>
 
+#if defined(__HIP_PLATFORM_AMD__)
+#include "hip_util.h"
+#include <hipcub/hipcub.hpp>
+namespace cub = hipcub;
+#else
 #include <cub/cub.cuh>
+#endif
 
 // temporary buffer for radix sort
 struct TempBuffer {
@@ -287,8 +293,32 @@ void radix_sort_pairs_device(void* context, KeyType* keys, ValueType* values, in
         return;
     }
 
+#if defined(__HIP_PLATFORM_AMD__)
+    // The first sort in a process can fail on HIP with an invalid-value error
+    // while the temporary buffer is correct, and every later call with the same
+    // buffer succeeds. cub leaves the input untouched when SortPairs fails, so
+    // the caller would carry on with data that was never sorted; the BVH Morton
+    // ordering is one such caller, and a tree built from unsorted keys goes
+    // wrong far from here. Retry once, and say so if the retry also fails.
+    cudaError_t sort_err =
+        cub::DeviceRadixSort::SortPairs(temp.mem, temp.size, d_keys, d_values, n, begin_bit, end_bit, stream);
+    if (sort_err != cudaSuccess) {
+        sort_err =
+            cub::DeviceRadixSort::SortPairs(temp.mem, temp.size, d_keys, d_values, n, begin_bit, end_bit, stream);
+    }
+    if (sort_err != cudaSuccess) {
+        wp::set_error_string(
+            "Warp sort error: radix sort of %d elements failed (%d: %s); the output is NOT sorted", n, (int)sort_err,
+            cudaGetErrorString(sort_err)
+        );
+        check_cuda(sort_err);
+        release_temp_buffer(temp);
+        return;
+    }
+#else
     // sort
     check_cuda(cub::DeviceRadixSort::SortPairs(temp.mem, temp.size, d_keys, d_values, n, begin_bit, end_bit, stream));
+#endif
 
     release_temp_buffer(temp);
 

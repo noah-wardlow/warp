@@ -242,6 +242,7 @@ uint64_t wp_texture_get_mip_level_array_device(void* context, uint64_t mipmap_ar
 bool wp_texture_copy_device(
     void* context,
     unsigned width_bytes,
+    unsigned width_texels,
     unsigned height,
     unsigned depth,
     int dst_memory_type,
@@ -255,6 +256,7 @@ bool wp_texture_copy_device(
     void* stream
 )
 {
+    (void)width_texels;  // only used by the HIP 3D runtime-copy path below
     ContextGuard guard(context);
 
     CUstream cuda_stream = static_cast<CUstream>(stream);
@@ -264,12 +266,168 @@ bool wp_texture_copy_device(
     copy_params.Height = height;
     copy_params.Depth = depth;
 
-    copy_params.dstMemoryType = static_cast<CUmemorytype>(dst_memory_type);
-    if (dst_memory_type == CU_MEMORYTYPE_HOST) {
+    // dst/src_memory_type arrive in the CUmemorytype *driver* convention used by
+    // the Python MemoryType enum (HOST=1, DEVICE=2, ARRAY=3). On HIP the
+    // hipMemoryType enum uses different numeric values, so compare against the
+    // driver convention explicitly and assign the backend enum (CU_MEMORYTYPE_*,
+    // which resolves to hipMemoryType* on HIP) rather than casting the raw int.
+    enum { WP_MEMTYPE_HOST = 1, WP_MEMTYPE_DEVICE = 2, WP_MEMTYPE_ARRAY = 3 };
+
+#if defined(__HIP_PLATFORM_AMD__)
+    // On gfx1151 / ROCm 7.2 the HIP host<->array texture copy corrupts the leading
+    // texels of the array: the first ~16 bytes (one texel block) read back stale,
+    // in a size- and allocation-dependent (partly non-deterministic) pattern.
+    // Verified experimentally that the *device*<->array path is clean while the
+    // *host*<->array path is not, so stage any host endpoint through a temporary
+    // device buffer:
+    //   HOST->ARRAY : host -> device(linear) -> array
+    //   ARRAY->HOST : array -> device(linear) -> host
+    // Device<->array copies go direct. 1D/2D use the runtime hipMemcpy2D{To,From}Array
+    // entry points; 3D uses the driver hipDrvMemcpy3D (also clean with a device endpoint).
+    // Only copies with exactly one array endpoint are handled; array<->array falls through.
+    if (depth <= 1 && ((dst_memory_type == WP_MEMTYPE_ARRAY) != (src_memory_type == WP_MEMTYPE_ARRAY))) {
+        const size_t rows = height > 0 ? height : 1;
+        const size_t total = size_t(width_bytes) * rows;
+
+        if (dst_memory_type == WP_MEMTYPE_ARRAY) {
+            if (src_memory_type == WP_MEMTYPE_DEVICE) {
+                return check_cuda(hipMemcpy2DToArrayAsync(
+                    reinterpret_cast<hipArray_t>(dst_handle), 0, 0, reinterpret_cast<const void*>(src_handle),
+                    src_pitch, width_bytes, rows, hipMemcpyDeviceToDevice, cuda_stream
+                ));
+            }
+            // HOST -> DEVICE(staging) -> ARRAY
+            void* staging = nullptr;
+            if (hipMalloc(&staging, total) != hipSuccess) {
+                wp::set_error_string("Warp error: failed to allocate texture staging buffer (%zu bytes)", total);
+                return false;
+            }
+            hipError_t e = hipMemcpy2DAsync(
+                staging, width_bytes, reinterpret_cast<const void*>(src_handle), src_pitch, width_bytes, rows,
+                hipMemcpyHostToDevice, cuda_stream
+            );
+            if (e == hipSuccess) {
+                e = hipMemcpy2DToArrayAsync(
+                    reinterpret_cast<hipArray_t>(dst_handle), 0, 0, staging, width_bytes, width_bytes, rows,
+                    hipMemcpyDeviceToDevice, cuda_stream
+                );
+            }
+            hipError_t sync_err = hipStreamSynchronize(cuda_stream);
+            hipError_t free_err = hipFree(staging);
+            if (e == hipSuccess)
+                e = (sync_err != hipSuccess) ? sync_err : free_err;
+            return check_cuda(e);
+        } else {
+            if (dst_memory_type == WP_MEMTYPE_DEVICE) {
+                return check_cuda(hipMemcpy2DFromArrayAsync(
+                    reinterpret_cast<void*>(dst_handle), dst_pitch, reinterpret_cast<hipArray_const_t>(src_handle), 0,
+                    0, width_bytes, rows, hipMemcpyDeviceToDevice, cuda_stream
+                ));
+            }
+            // ARRAY -> DEVICE(staging) -> HOST
+            void* staging = nullptr;
+            if (hipMalloc(&staging, total) != hipSuccess) {
+                wp::set_error_string("Warp error: failed to allocate texture staging buffer (%zu bytes)", total);
+                return false;
+            }
+            hipError_t e = hipMemcpy2DFromArrayAsync(
+                staging, width_bytes, reinterpret_cast<hipArray_const_t>(src_handle), 0, 0, width_bytes, rows,
+                hipMemcpyDeviceToDevice, cuda_stream
+            );
+            if (e == hipSuccess) {
+                e = hipMemcpy2DAsync(
+                    reinterpret_cast<void*>(dst_handle), dst_pitch, staging, width_bytes, width_bytes, rows,
+                    hipMemcpyDeviceToHost, cuda_stream
+                );
+            }
+            hipError_t sync_err = hipStreamSynchronize(cuda_stream);
+            hipError_t free_err = hipFree(staging);
+            if (e == hipSuccess)
+                e = (sync_err != hipSuccess) ? sync_err : free_err;
+            return check_cuda(e);
+        }
+    }
+
+    // 3D textures: same host<->array corruption, AND the driver hipDrvMemcpy3D is not
+    // recorded into HIP graphs (device<->array copies under capture replay as no-ops).
+    // Stage any host endpoint through a temporary device buffer, then run the *runtime*
+    // hipMemcpy3DAsync for the device<->array leg -- it is capturable and honors the
+    // array pitch. The runtime extent is in array elements, so read the element width
+    // from the array descriptor. Device-direct copies stay fully async (no alloc/sync/
+    // free) so they remain legal and get captured during graph capture.
+    if (depth > 1 && ((dst_memory_type == WP_MEMTYPE_ARRAY) != (src_memory_type == WP_MEMTYPE_ARRAY))) {
+        const size_t rows = height > 0 ? height : 1;
+        const size_t total = size_t(width_bytes) * rows * size_t(depth);
+        const bool to_array = (dst_memory_type == WP_MEMTYPE_ARRAY);
+        const uint64_t array_handle = to_array ? dst_handle : src_handle;
+        const int linear_mt = to_array ? src_memory_type : dst_memory_type;
+        const uint64_t linear_handle = to_array ? src_handle : dst_handle;
+        const unsigned linear_pitch = to_array ? src_pitch : dst_pitch;
+
+        void* staging = nullptr;
+        void* dev_ptr;
+        if (linear_mt == WP_MEMTYPE_DEVICE) {
+            dev_ptr = reinterpret_cast<void*>(linear_handle);
+        } else {
+            if (hipMalloc(&staging, total) != hipSuccess) {
+                wp::set_error_string("Warp error: failed to allocate texture staging buffer (%zu bytes)", total);
+                return false;
+            }
+            dev_ptr = staging;
+        }
+
+        hipError_t e = hipSuccess;
+        // host -> device staging (upload) before the array copy
+        if (staging && to_array) {
+            e = hipMemcpy2DAsync(
+                staging, width_bytes, reinterpret_cast<const void*>(linear_handle), linear_pitch, width_bytes,
+                rows * depth, hipMemcpyHostToDevice, cuda_stream
+            );
+        }
+
+        if (e == hipSuccess) {
+            // Runtime hipMemcpy3D measures the array extent in *elements* (texels),
+            // so use the texel width passed from Python. Querying the array
+            // descriptor here would be illegal during graph capture.
+            hipMemcpy3DParms p = {};
+            p.extent = make_hipExtent(width_texels, rows, depth);
+            p.kind = hipMemcpyDeviceToDevice;
+            if (to_array) {
+                p.srcPtr = make_hipPitchedPtr(dev_ptr, width_bytes, width_bytes, rows);
+                p.dstArray = reinterpret_cast<hipArray_t>(array_handle);
+            } else {
+                p.srcArray = reinterpret_cast<hipArray_t>(array_handle);
+                p.dstPtr = make_hipPitchedPtr(dev_ptr, width_bytes, width_bytes, rows);
+            }
+            e = hipMemcpy3DAsync(&p, cuda_stream);
+        }
+
+        // device staging -> host (readback) after the array copy
+        if (staging && !to_array && e == hipSuccess) {
+            e = hipMemcpy2DAsync(
+                reinterpret_cast<void*>(linear_handle), linear_pitch, staging, width_bytes, width_bytes,
+                rows * depth, hipMemcpyDeviceToHost, cuda_stream
+            );
+        }
+
+        if (staging) {
+            hipError_t sync_err = hipStreamSynchronize(cuda_stream);
+            hipError_t free_err = hipFree(staging);
+            if (e == hipSuccess)
+                e = (sync_err != hipSuccess) ? sync_err : free_err;
+        }
+        return check_cuda(e);
+    }
+#endif  // defined(__HIP_PLATFORM_AMD__)
+
+    if (dst_memory_type == WP_MEMTYPE_HOST) {
+        copy_params.dstMemoryType = CU_MEMORYTYPE_HOST;
         copy_params.dstHost = reinterpret_cast<void*>(dst_handle);
-    } else if (dst_memory_type == CU_MEMORYTYPE_DEVICE) {
-        copy_params.dstDevice = static_cast<CUdeviceptr>(dst_handle);
-    } else if (dst_memory_type == CU_MEMORYTYPE_ARRAY) {
+    } else if (dst_memory_type == WP_MEMTYPE_DEVICE) {
+        copy_params.dstMemoryType = CU_MEMORYTYPE_DEVICE;
+        copy_params.dstDevice = (CUdeviceptr)(dst_handle);
+    } else if (dst_memory_type == WP_MEMTYPE_ARRAY) {
+        copy_params.dstMemoryType = CU_MEMORYTYPE_ARRAY;
         copy_params.dstArray = reinterpret_cast<CUarray>(dst_handle);
     } else {
         wp::set_error_string("Invalid destination memory type %d", dst_memory_type);
@@ -278,12 +436,14 @@ bool wp_texture_copy_device(
     copy_params.dstPitch = dst_pitch;
     copy_params.dstHeight = dst_height;
 
-    copy_params.srcMemoryType = static_cast<CUmemorytype>(src_memory_type);
-    if (src_memory_type == CU_MEMORYTYPE_HOST) {
+    if (src_memory_type == WP_MEMTYPE_HOST) {
+        copy_params.srcMemoryType = CU_MEMORYTYPE_HOST;
         copy_params.srcHost = reinterpret_cast<void*>(src_handle);
-    } else if (src_memory_type == CU_MEMORYTYPE_DEVICE) {
-        copy_params.srcDevice = static_cast<CUdeviceptr>(src_handle);
-    } else if (src_memory_type == CU_MEMORYTYPE_ARRAY) {
+    } else if (src_memory_type == WP_MEMTYPE_DEVICE) {
+        copy_params.srcMemoryType = CU_MEMORYTYPE_DEVICE;
+        copy_params.srcDevice = (CUdeviceptr)(src_handle);
+    } else if (src_memory_type == WP_MEMTYPE_ARRAY) {
+        copy_params.srcMemoryType = CU_MEMORYTYPE_ARRAY;
         copy_params.srcArray = reinterpret_cast<CUarray>(src_handle);
     } else {
         wp::set_error_string("Invalid source memory type %d", src_memory_type);
@@ -425,7 +585,7 @@ uint64_t wp_texture_object_create_device(
     CUtexObject tex_object = 0;
     check_cu(cuTexObjectCreate_f(&tex_object, &res_desc, &tex_desc, nullptr));
 
-    return tex_object;
+    return (uint64_t)(tex_object);
 }
 
 void wp_texture_object_destroy_device(void* context, uint64_t tex_handle)
@@ -448,7 +608,7 @@ uint64_t wp_surface_object_create_device(void* context, uint64_t array_handle)
     cudaSurfaceObject_t surface = 0;
     check_cuda(cudaCreateSurfaceObject(&surface, &desc));
 
-    return static_cast<uint64_t>(surface);
+    return (uint64_t)(surface);
 }
 
 void wp_surface_object_destroy_device(void* context, uint64_t surface_handle)
@@ -457,7 +617,7 @@ void wp_surface_object_destroy_device(void* context, uint64_t surface_handle)
         return;
 
     ContextGuard guard(context);
-    check_cuda(cudaDestroySurfaceObject(static_cast<cudaSurfaceObject_t>(surface_handle)));
+    check_cuda(cudaDestroySurfaceObject((cudaSurfaceObject_t)surface_handle));
 }
 
 #else  // WP_ENABLE_CUDA
@@ -483,6 +643,7 @@ uint64_t wp_texture_get_mip_level_array_device(void* context, uint64_t mipmap_ar
 bool wp_texture_copy_device(
     void* context,
     unsigned width_bytes,
+    unsigned width_texels,
     unsigned height,
     unsigned depth,
     int dst_memory_type,

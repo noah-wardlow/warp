@@ -4015,8 +4015,15 @@ class array(Array[DType, NDim]):
             raise RuntimeError("Array has no device assigned")
 
         if self.device.is_cuda:
+            # On HIP report kDLROCM: consumers that key their backend on the
+            # DLPack device type (e.g. jax-rocm) reject kDLCUDA. Matches the
+            # _device_to_dlpack mapping used for exported capsules.
+            if self.device.is_hip:
+                return (warp._src.dlpack.DLDeviceType.kDLROCM, self.device.ordinal)
             return (warp._src.dlpack.DLDeviceType.kDLCUDA, self.device.ordinal)
         elif self.pinned:
+            if warp._src.context.runtime is not None and warp._src.context.runtime.is_hip:
+                return (warp._src.dlpack.DLDeviceType.kDLROCMHost, 0)
             return (warp._src.dlpack.DLDeviceType.kDLCUDAHost, 0)
         else:
             return (warp._src.dlpack.DLDeviceType.kDLCPU, 0)
@@ -4476,6 +4483,43 @@ class array(Array[DType, NDim]):
                 result = result.view(ml_bf16)
 
         return result
+
+    def numpy_view(self):
+        """Return a zero-copy :class:`numpy.ndarray` view of this array, without a
+        device-to-host copy.
+
+        Requires the array to be in **CPU-accessible unified (managed) memory** --
+        either a CPU array, or a CUDA/HIP array allocated by the unified-memory
+        hybrid allocator (``WARP_ENABLE_UMA_HYBRID``); for a portable staging
+        buffer use :class:`warp.ReadbackBuffer` instead. Raises for ordinary
+        device-local arrays, whose memory is uncached from the CPU.
+
+        On unified-memory hardware (APU/iGPU) this is markedly faster than
+        :meth:`numpy` for large readbacks. The device is synchronized first so
+        outstanding GPU writes are visible. The returned array **aliases** the
+        device memory: it is valid only while this array is alive and unchanged
+        by the GPU.
+        """
+        if not self.ptr:
+            return self.numpy()
+        if not self.is_contiguous:
+            raise RuntimeError("numpy_view() requires a contiguous array")
+
+        import warp._src.uma as _uma
+
+        if self.device.is_cpu:
+            return _uma.zero_copy_view(self.ptr, self.dtype, self.shape)
+
+        allocator = self.device.current_allocator
+        is_managed = getattr(allocator, "is_managed", None)
+        if is_managed is None or not is_managed(self.ptr):
+            raise RuntimeError(
+                "numpy_view() requires CPU-accessible unified (managed) memory; this array is "
+                "device-local. Use numpy() (a copy), or warp.ReadbackBuffer / the unified-memory "
+                "hybrid allocator (WARP_ENABLE_UMA_HYBRID) for zero-copy readback."
+            )
+        warp.synchronize_device(self.device)
+        return _uma.zero_copy_view(self.ptr, self.dtype, self.shape)
 
     def cptr(self):
         """Return a ctypes cast of the array address.

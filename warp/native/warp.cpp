@@ -155,6 +155,13 @@ int wp_is_cuda_compatibility_enabled() { return int(WP_ENABLE_CUDA_COMPATIBILITY
 
 int wp_is_mathdx_enabled() { return int(WP_ENABLE_MATHDX); }
 
+// cuBQL is CUDA-only; the HIP build stubs it out (see bvh_cubql.cu). Mirror
+// that here so wp_is_cubql_enabled() — and thus wp.is_cubql_available() — report
+// it as unavailable on HIP, letting tests/users gate the "cubql" constructor.
+#if defined(__HIP_PLATFORM_AMD__) && !defined(WP_DISABLE_CUBQL)
+#define WP_DISABLE_CUBQL 1
+#endif
+
 #ifdef WP_DISABLE_CUBQL
 int wp_is_cubql_enabled() { return 0; }
 #else
@@ -1079,7 +1086,7 @@ WP_API void wp_nvrtc_supported_archs(int* archs) { }
 WP_API int wp_cuda_device_get_count() { return 0; }
 WP_API void* wp_cuda_device_get_primary_context(int ordinal) { return NULL; }
 WP_API const char* wp_cuda_device_get_name(int ordinal) { return NULL; }
-WP_API int wp_cuda_device_get_arch(int ordinal) { return 0; }
+WP_API const char* wp_cuda_device_get_arch(int ordinal) { return NULL; }
 WP_API int wp_cuda_device_get_sm_count(int ordinal) { return 0; }
 WP_API int wp_cuda_device_get_max_shared_memory(int ordinal) { return 0; }
 WP_API void wp_cuda_device_get_uuid(int ordinal, char uuid[16]) { }
@@ -1093,6 +1100,7 @@ WP_API int wp_cuda_device_get_host_native_atomic_supported(int ordinal) { return
 WP_API int wp_cuda_device_get_managed_memory_supported(int ordinal) { return 0; }
 WP_API int wp_cuda_device_get_concurrent_managed_access_supported(int ordinal) { return 0; }
 WP_API int wp_cuda_pointer_get_memory_kind(void* context, void* ptr) { return WP_MEMORY_KIND_UNKNOWN; }
+WP_API int wp_cuda_set_memory_coarse_grain(void* context, void* ptr, size_t size) { return 0; }
 WP_API int wp_cuda_device_is_mempool_supported(int ordinal) { return 0; }
 WP_API int wp_cuda_device_is_ipc_supported(int ordinal) { return 0; }
 WP_API int wp_cuda_device_set_mempool_release_threshold(int ordinal, uint64_t threshold) { return 0; }

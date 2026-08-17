@@ -61,10 +61,23 @@ WP_API float wp_bfloat16_bits_to_float(uint16_t u);
 WP_API void* wp_alloc_host(size_t s, const char* tag = nullptr);
 WP_API void* wp_alloc_pinned(size_t s, const char* tag = nullptr);
 WP_API void* wp_alloc_device(void* context, size_t s, const char* tag = nullptr);
+
+// Allocate and release a descriptor block (BVH, Mesh), whose device address
+// doubles as the object's public id. On HIP these are pooled rather than
+// returned to the driver, because recycling the address is not safe there; see
+// wp_descriptor_alloc in warp.cu. On CUDA they forward to wp_alloc_device and
+// wp_free_device.
+WP_API void* wp_descriptor_alloc(void* context, size_t s, const char* tag = nullptr);
+WP_API void wp_descriptor_free(void* context, void* ptr, size_t s);
+// Drop a context's pooled descriptor blocks. Called when the context is torn
+// down, since the memory goes with it and a later context can reuse the handle.
+WP_API void wp_descriptor_pool_release(void* context);
 WP_API void* wp_alloc_device_default(void* context, size_t s, const char* tag = nullptr);
 WP_API void*
 wp_alloc_device_async(void* context, size_t s, void* stream = WP_CURRENT_STREAM, const char* tag = nullptr);
 WP_API void* wp_alloc_device_managed(void* context, size_t s, const char* tag = nullptr);
+WP_API void* wp_alloc_managed_device(void* context, size_t s);  // uses cudaMallocManaged() for UMA
+WP_API void wp_free_managed_device(void* context, void* ptr);  // for managed memory
 
 WP_API void wp_free_host(void* ptr);
 WP_API void wp_free_pinned(void* ptr);
@@ -382,6 +395,7 @@ WP_API void wp_surface_object_destroy_device(void* context, uint64_t surface_han
 WP_API bool wp_texture_copy_device(
     void* context,
     unsigned width_bytes,
+    unsigned width_texels,
     unsigned height,
     unsigned depth,
     int dst_memory_type,
@@ -682,7 +696,8 @@ WP_API void wp_nvrtc_supported_archs(int* archs);
 WP_API int wp_cuda_device_get_count();
 WP_API void* wp_cuda_device_get_primary_context(int ordinal);
 WP_API const char* wp_cuda_device_get_name(int ordinal);
-WP_API int wp_cuda_device_get_arch(int ordinal);
+WP_API const char* wp_cuda_device_get_arch(int ordinal);
+WP_API int wp_cuda_device_is_uma(int ordinal);
 WP_API int wp_cuda_device_get_sm_count(int ordinal);
 WP_API int wp_cuda_device_get_max_shared_memory(int ordinal);
 WP_API void wp_cuda_device_get_uuid(int ordinal, char uuid[16]);
@@ -696,6 +711,7 @@ WP_API int wp_cuda_device_get_host_native_atomic_supported(int ordinal);
 WP_API int wp_cuda_device_get_managed_memory_supported(int ordinal);
 WP_API int wp_cuda_device_get_concurrent_managed_access_supported(int ordinal);
 WP_API int wp_cuda_pointer_get_memory_kind(void* context, void* ptr);
+WP_API int wp_cuda_set_memory_coarse_grain(void* context, void* ptr, size_t size);  // HIP only; 1 on success
 WP_API int wp_cuda_device_is_mempool_supported(int ordinal);
 WP_API int wp_cuda_device_is_ipc_supported(int ordinal);
 WP_API int wp_cuda_device_set_mempool_release_threshold(int ordinal, uint64_t threshold);

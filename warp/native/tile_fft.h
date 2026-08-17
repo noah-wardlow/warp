@@ -313,7 +313,12 @@ template <int DirectionSign, typename Complex, int Ept, typename Fwd, typename T
 inline CUDA_CALLABLE void tile_fft_entry(Fwd fun_forward, int shared_bytes, int batch, Tile& Xinout)
 {
     if constexpr (wp_is_null_func<Fwd>::value) {
-#if !defined(__CUDA_ARCH__)
+// hipcc does not define __CUDA_ARCH__, so testing it alone selects the CPU
+// path during HIP device compilation and the GPU then runs the sequential
+// implementation, which assumes block_dim==1 and returns the input untransformed.
+// Test for device compilation the same way the rest of the codebase does
+// (see crt.h and builtin.h).
+#if !defined(__CUDA_ARCH__) && !defined(__HIP_DEVICE_COMPILE__)
         // CPU sequential — block_dim==1 makes Xinout.data row-major contiguous.
         tile_fft_cpu_impl<DirectionSign, Complex>(batch, Ept, Xinout.data);
 #else

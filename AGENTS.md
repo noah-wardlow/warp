@@ -68,5 +68,6 @@ Follow Google-style docstrings. Use doctest for code examples where practical.
 - Refer to `warp/examples/` for reference patterns for kernels, launches, and array usage.
 - Always import from `warp` in public-facing code, not `warp._src`. In internal code, import directly from `warp/_src/` modules. Public API is re-exported through `warp/__init__.py`.
 - `warp._src.utils` imports `warp._src.context` at module level—importing from `utils` in early-loaded modules (e.g., `texture.py`) causes circular imports. Use lazy imports (`from warp._src.utils import ... # noqa: PLC0415` inside functions) when needed.
+- Use `warp._src.logger.log_warning()` instead of `warnings.warn()`—it routes warnings to stdout (some applications don't want Warp writing to stderr).
 - Use the `DeviceLike` type annotation (from `warp._src.context`) for `device` parameters. In modules where importing it at runtime would create a circular import, import it under `TYPE_CHECKING`.
 - Native bindings use ctypes; function signatures are registered in `Runtime.__init__` in `warp/_src/context.py`.

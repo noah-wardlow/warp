@@ -11,7 +11,7 @@
 #define PNANOVDB_MEMCPY_CUSTOM
 #define pnanovdb_memcpy memcpy
 
-#if defined(WP_NO_CRT) && (!defined(__CUDACC__) || (defined(__clang__) && defined(__CUDA__)))
+#if defined(WP_NO_CRT) && (!defined(__CUDACC__) || (defined(__clang__) && defined(__CUDA__))) && !defined(__HIPCC__)
 // PNanoVDB will try to include <stdint.h> unless __CUDACC_RTC__ is defined.
 // Clang CUDA JIT also lacks stdint.h since it doesn't use the full CUDA Toolkit headers.
 #define __CUDACC_RTC__
@@ -19,7 +19,7 @@
 
 #include "nanovdb/PNanoVDB.h"
 
-#if defined(WP_NO_CRT) && (!defined(__CUDACC__) || (defined(__clang__) && defined(__CUDA__)))
+#if defined(WP_NO_CRT) && (!defined(__CUDACC__) || (defined(__clang__) && defined(__CUDA__))) && !defined(__HIPCC__)
 #undef __CUDACC_RTC__
 #endif
 

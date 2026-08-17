@@ -9,7 +9,13 @@
 #include "temp_buffer.h"
 
 #define THRUST_IGNORE_CUB_VERSION_CHECK
+#if defined(__HIP_PLATFORM_AMD__)
+#include "hip_util.h"
+#include <hipcub/hipcub.hpp>
+namespace cub = hipcub;
+#else
 #include <cub/device/device_reduce.cuh>
+#endif
 
 namespace {
 
@@ -197,6 +203,17 @@ template <typename ElemT, typename ScalarT> struct cub_inner_product_iterator {
     CUDA_CALLABLE bool operator!=(const self_type& rhs) const { return (ptr_a != rhs.ptr_a); }
 
 private:
+    // Keep this out of line on ROCm/HIP. hipCUB's DeviceReduce (rocPRIM
+    // default_config) instantiates the whole reduce pipeline for every known GPU
+    // arch (gfx1201/1200/1102/1100/...). Inlining this per-element loop into each
+    // of those per-arch kernels explodes AMDGPU backend compile time — reduce.cu
+    // can spin for many minutes / effectively never finish. A single out-of-line
+    // copy, called per element, keeps each per-arch kernel small (~50 s compile).
+    // The trivial iterator used by array_sum does not hit this; only this fused
+    // inner-product dereference does. CUDA/NVRTC is unaffected (attribute guarded).
+#if defined(__HIP_PLATFORM_AMD__)
+    __attribute__((noinline))
+#endif
     CUDA_CALLABLE ScalarT compute_value(difference_type n) const
     {
         ScalarT val(0);

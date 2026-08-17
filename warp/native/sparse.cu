@@ -19,10 +19,17 @@
 
 #define THRUST_IGNORE_CUB_VERSION_CHECK
 
+#if defined(__HIP_PLATFORM_AMD__)
+#include "hip_util.h"
+
+#include <hipcub/hipcub.hpp>
+namespace cub = hipcub;
+#else
 #include <cub/device/device_radix_sort.cuh>
 #include <cub/device/device_run_length_encode.cuh>
 #include <cub/device/device_scan.cuh>
 #include <cub/device/device_select.cuh>
+#endif
 
 extern CUcontext get_current_context();
 
@@ -108,11 +115,36 @@ template <typename T, int BlockSize> struct BlockIterator {
         return BlockIterator(ptr + offset * stride, stride);
     }
 
+    // rocPRIM's device_partition forms `it + offset - 1`, which requires
+    // iterator-minus-integer (returning an iterator); CUB never exercised it.
+    CUDA_CALLABLE BlockIterator operator-(difference_type offset) const
+    {
+        return BlockIterator(ptr - offset * stride, stride);
+    }
+
+    CUDA_CALLABLE BlockIterator& operator+=(difference_type offset)
+    {
+        ptr += offset * stride;
+        return *this;
+    }
+
+    CUDA_CALLABLE BlockIterator& operator-=(difference_type offset)
+    {
+        ptr -= offset * stride;
+        return *this;
+    }
+
     CUDA_CALLABLE difference_type operator-(const BlockIterator& other) const { return (ptr - other.ptr) / stride; }
 
     CUDA_CALLABLE bool operator==(const BlockIterator& other) const { return ptr == other.ptr; }
     CUDA_CALLABLE bool operator!=(const BlockIterator& other) const { return ptr != other.ptr; }
 };
+
+template <typename T, int BlockSize>
+CUDA_CALLABLE BlockIterator<T, BlockSize> operator+(ptrdiff_t offset, const BlockIterator<T, BlockSize>& it)
+{
+    return it + offset;
+}
 
 struct BsrColumnIsActive {
     CUDA_CALLABLE bool operator()(const int& col) const { return col >= 0; }
@@ -594,7 +626,17 @@ CUDA_CALLABLE_DEVICE int bsr_compress_select_sorted_runs(
     int* selected_run_starts
 )
 {
-    constexpr unsigned int full_warp_mask = 0xffffffffu;
+    // ROCm's warp-sync functions static_assert a 64-bit mask; CUDA's take
+    // 32-bit. The mask must cover one full wavefront, which is 64 lanes on
+    // GCN and CDNA (gfx9) and 32 lanes on RDNA (gfx10 and later), so the
+    // value follows WP_TILE_WARP_SIZE rather than a fixed low-32-bit mask.
+#if defined(__HIP_PLATFORM_AMD__)
+    using warp_mask_t = unsigned long long;
+    constexpr warp_mask_t full_warp_mask = WP_TILE_WARP_SIZE == 64 ? ~warp_mask_t(0) : warp_mask_t(0xffffffffull);
+#else
+    using warp_mask_t = unsigned int;
+    constexpr warp_mask_t full_warp_mask = 0xffffffffu;
+#endif
 
     const int tid = threadIdx.x;
     const int lane = tid & (WP_TILE_WARP_SIZE - 1);
@@ -616,9 +658,10 @@ CUDA_CALLABLE_DEVICE int bsr_compress_select_sorted_runs(
             run_start = col >= 0 && col != BSR_COMPRESS_INVALID_COLUMN && prev_col != col;
         }
 
-        const unsigned int keep_mask = __ballot_sync(full_warp_mask, run_start);
-        const int warp_total = __popc(keep_mask);
-        const int lane_prefix = __popc(keep_mask & ((1u << lane) - 1u));
+        const warp_mask_t keep_mask = __ballot_sync(full_warp_mask, run_start);
+        const int warp_total = __popcll(static_cast<unsigned long long>(keep_mask));
+        const int lane_prefix
+            = __popcll(static_cast<unsigned long long>(keep_mask & ((warp_mask_t(1) << lane) - warp_mask_t(1))));
 
         if (lane == WP_TILE_WARP_SIZE - 1) {
             warp_offsets[warp] = warp_total;

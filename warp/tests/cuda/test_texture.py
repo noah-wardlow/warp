@@ -949,8 +949,21 @@ def test_texture2d_cuda_array_wraps_non_mipmapped(test, device):
     test.assertFalse(wrapped.is_mipmapped)
 
 
+def _skip_without_mipmap_support(test, device):
+    """Mipmapped textures require mipmapped-array creation, which is unsupported on some
+    backends: on gfx1151/ROCm 7.2 ``hipMipmappedArrayCreate`` returns "operation not
+    supported" (error 801). Skip mipmap tests there rather than reporting an error."""
+    try:
+        wp.Texture2D(np.zeros((4, 4), dtype=np.float32), num_mip_levels=2, device=device)
+    except RuntimeError as e:
+        if "not supported" in str(e).lower():
+            test.skipTest("mipmapped textures are not supported on this device")
+        raise
+
+
 def test_texture2d_mipmapped_cuda_array_current_limitation(test, device):
     """Verify Texture2D.cuda_array rejects mipmapped CUDA textures as a current limitation."""
+    _skip_without_mipmap_support(test, device)
     data = np.zeros((4, 4, 4), dtype=np.float32)
     tex = wp.Texture2D(data, num_mip_levels=2, device=device)
 
@@ -2758,6 +2771,7 @@ def sample_texture3d_mipmap(
 
 def test_texture2d_mipmap_full_chain(test, device):
     """A texture created with num_mip_levels=0 should expose the full chain down to 1x1."""
+    _skip_without_mipmap_support(test, device)
     width = height = 16
     data = np.zeros((height, width, 4), dtype=np.float32)
     y = np.linspace(0.0, 1.0, height, dtype=np.float32)
@@ -2790,6 +2804,7 @@ def test_texture2d_mipmap_full_chain(test, device):
 
 def test_texture2d_mipmap_lod_selects_constant_level(test, device):
     """Sampling at an integer LOD should return the constant color of that level."""
+    _skip_without_mipmap_support(test, device)
     width = height = 8
 
     base = np.full((height, width, 4), fill_value=0.1, dtype=np.float32)
@@ -2818,6 +2833,7 @@ def test_texture2d_mipmap_lod_selects_constant_level(test, device):
 
 
 def test_texture1d_mipmap(test, device):
+    _skip_without_mipmap_support(test, device)
     width = 16
     data = np.linspace(0.0, 1.0, width, dtype=np.float32)
     tex = wp.Texture1D(data=data, num_mip_levels=0, device=device)
@@ -2831,6 +2847,7 @@ def test_texture1d_mipmap(test, device):
 
 
 def test_texture3d_mipmap(test, device):
+    _skip_without_mipmap_support(test, device)
     size = 8
     data = np.full((size, size, size), fill_value=0.25, dtype=np.float32)
 
@@ -2855,6 +2872,7 @@ def test_texture3d_mipmap(test, device):
 
 
 def test_texture2d_mipmap_rejects_copy(test, device):
+    _skip_without_mipmap_support(test, device)
     data = np.zeros((8, 8), dtype=np.float32)
     tex = wp.Texture2D(data=data, num_mip_levels=2, device=device)
     with test.assertRaises(RuntimeError):

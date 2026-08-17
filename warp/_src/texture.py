@@ -38,6 +38,42 @@ from warp._src.types import (
 # in __init__ methods to avoid circular imports
 
 _SUPPORTED_TEXTURE_DTYPES = (uint8, uint16, uint32, int8, int16, int32, float16, float32)
+
+# Texture handles whose destruction was requested while a stream capture was
+# active on their device. Destroying texture objects / CUDA arrays implies a
+# context synchronization, which is illegal during stream capture (CUDA error
+# 900) and would invalidate the capture and can poison the memory pool. The
+# destroy is deferred until captures end (mirrors the native deferred-free
+# list in warp.cu). Drained by wp.capture_end() and on later texture destroys.
+_deferred_destroys = []
+
+
+def _flush_deferred_destroys():
+    """Destroy texture handles whose teardown was deferred during stream capture.
+
+    Entries whose device is still capturing are kept for a later flush.
+    """
+    if not _deferred_destroys:
+        return
+    remaining = []
+    for entry in _deferred_destroys:
+        device, core, tex_handle, surface_handle, array_handle, is_mipmapped = entry
+        try:
+            if device.is_capturing:
+                remaining.append(entry)
+                continue
+            with device.context_guard:
+                if tex_handle:
+                    core.wp_texture_object_destroy_device(device.context, tex_handle)
+                if surface_handle:
+                    core.wp_surface_object_destroy_device(device.context, surface_handle)
+                if array_handle:
+                    core.wp_texture_destroy_device(device.context, array_handle, is_mipmapped)
+        except (TypeError, AttributeError):
+            pass
+    _deferred_destroys[:] = remaining
+
+
 _MAX_TEXTURE_MIP_LEVELS = 16
 
 
@@ -458,6 +494,22 @@ class Texture:
 
         try:
             if self.device.is_cuda:
+                if self.device.is_capturing:
+                    # Destroying texture objects / CUDA arrays implies a context
+                    # sync, which is illegal while a stream capture is active
+                    # (CUDA error 900) and would invalidate the capture. Defer
+                    # the teardown; wp.capture_end() drains the list.
+                    _deferred_destroys.append(
+                        (
+                            self.device,
+                            self._runtime.core,
+                            self._tex_handle,
+                            self._surface_handle,
+                            self._array_handle if self._array_owner else 0,
+                            self._is_mipmapped,
+                        )
+                    )
+                    return
                 with self.device.context_guard:
                     if self._tex_handle:
                         self._runtime.core.wp_texture_object_destroy_device(self.device.context, self._tex_handle)
@@ -467,6 +519,7 @@ class Texture:
                         self._runtime.core.wp_texture_destroy_device(
                             self.device.context, self._array_handle, self._is_mipmapped
                         )
+                _flush_deferred_destroys()
             else:
                 self._runtime.core.wp_texture_destroy_host(self._tex_handle)
         except (TypeError, AttributeError):
@@ -644,6 +697,7 @@ class Texture:
             result = self._runtime.core.wp_texture_copy_device(
                 self.device.context,
                 width_bytes,
+                self.width,
                 height,
                 depth,
                 MemoryType.ARRAY,
@@ -751,6 +805,7 @@ class Texture:
             result = self._runtime.core.wp_texture_copy_device(
                 self.device.context,
                 width_bytes,
+                self.width,
                 height,
                 depth,
                 dst_memory_type,
@@ -901,6 +956,7 @@ class Texture:
                 result = self._runtime.core.wp_texture_copy_device(
                     self.device.context,
                     width_bytes,
+                    level_w,
                     level_h,
                     level_d,
                     MemoryType.ARRAY,

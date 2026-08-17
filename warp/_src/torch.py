@@ -191,6 +191,7 @@ def from_torch(
     dtype: type | None = None,
     requires_grad: bool | None = None,
     grad=None,
+    sync: bool = True,
     return_ctype: bool = False,
     retain_grad: bool = False,
 ) -> warp.array | warp._src.types.array_t:
@@ -213,10 +214,20 @@ def from_torch(
         return_ctype: Whether to return a low-level array descriptor instead of a ``wp.array`` object (faster).
           The descriptor can be passed to Warp kernels.
         retain_grad: Whether to preserve gradients during backward instead of zeroing after read.
+        sync: Whether to synchronize PyTorch's stream before Warp uses the tensor.
+          This ensures any pending PyTorch operations on the tensor are complete.
+          Set to False if you know the tensor is not being modified by PyTorch.
+          Default is True for correctness on AMD/HIP platforms.
 
     Returns:
         The wrapped array or array descriptor.
     """
+    # On HIP/AMD, PyTorch and Warp may use different streams, and stream synchronization
+    # semantics differ from CUDA. Sync PyTorch's stream to ensure tensor data is ready.
+    if sync and t.is_cuda:
+        import torch  # noqa: PLC0415
+        torch.cuda.current_stream(t.device).synchronize()
+
     if dtype is None:
         dtype = dtype_from_torch(t.dtype)
     elif not dtype_is_compatible(t.dtype, dtype):

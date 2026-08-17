@@ -9,6 +9,7 @@ import numpy as np
 
 import warp as wp
 import warp._src.codegen as codegen
+import warp._src.context
 from warp._src.context import ModuleBuilder
 from warp.tests.unittest_utils import add_function_test, assert_np_equal, get_cuda_test_devices, get_test_devices
 
@@ -500,8 +501,11 @@ class TestClusterDim(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "cluster_dim"):
                 wp.compile_aot_module(k.module, device=None, arch=80, module_dir=module_dir)
 
-            # A cluster-capable target compiles cleanly.
-            wp.compile_aot_module(k.module, device=None, arch=90, module_dir=module_dir)
+            # A cluster-capable target compiles cleanly. This half needs an NVRTC
+            # that can target sm90; a build without CUDA support has none, and the
+            # guard above is what the test is actually asserting.
+            if 90 in warp._src.context.runtime.nvrtc_supported_archs:
+                wp.compile_aot_module(k.module, device=None, arch=90, module_dir=module_dir)
 
     def test_aot_stale_live_clustered_kernel_errors(self):
         """Verify the sub-sm90 AOT guard scans the live unique-kernel set, not ``module.kernels``.

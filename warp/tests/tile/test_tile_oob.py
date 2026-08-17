@@ -130,7 +130,9 @@ def test_cuda_shared_tile_oob_reports_tile_index(test, device):
     output = stdout + stderr
     test.assertRegex(output, r"Warp tile index out of bounds in shared tile")
     test.assertRegex(output, r"coordinate dimension 0 has index 1, outside valid range \[0, 1\)")
-    test.assertRegex(output, r"device-side assert triggered")
+    # CUDA reports "device-side assert triggered"; HIP/ROCm reports "Device-side
+    # assertion ... failed" and/or an HSA_STATUS_ERROR_EXCEPTION. Accept either.
+    test.assertRegex(output, r"(?i)device-side assert|HSA_STATUS_ERROR_EXCEPTION")
 
 
 # The CPU OOB checks abort the process, so run them as fixed-device tests

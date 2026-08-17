@@ -251,7 +251,7 @@ static void wp_mesh_free_device_allocations(wp::Mesh& mesh, wp::Mesh* mesh_devic
         mesh.solid_angle_props = nullptr;
     }
     if (mesh_device) {
-        wp_free_device(WP_CURRENT_CONTEXT, mesh_device);
+        wp_descriptor_free(WP_CURRENT_CONTEXT, mesh_device, sizeof(wp::Mesh));
     }
 }
 
@@ -286,7 +286,7 @@ uint64_t wp_mesh_create_device(
         );
     }
 
-    wp::Mesh* mesh_device = (wp::Mesh*)wp_alloc_device(WP_CURRENT_CONTEXT, sizeof(wp::Mesh), "(native:mesh)");
+    wp::Mesh* mesh_device = (wp::Mesh*)wp_descriptor_alloc(WP_CURRENT_CONTEXT, sizeof(wp::Mesh), "(native:mesh)");
     wp_memcpy_h2d(WP_CURRENT_CONTEXT, mesh_device, &mesh, sizeof(wp::Mesh));
 
     // save descriptor
@@ -354,7 +354,7 @@ void wp_mesh_destroy_device(uint64_t id)
 
         wp_free_device(WP_CURRENT_CONTEXT, mesh.lowers);
         wp_free_device(WP_CURRENT_CONTEXT, mesh.uppers);
-        wp_free_device(WP_CURRENT_CONTEXT, (wp::Mesh*)id);
+        wp_descriptor_free(WP_CURRENT_CONTEXT, (void*)id, sizeof(wp::Mesh));
 
         if (mesh.solid_angle_props) {
             wp_free_device(WP_CURRENT_CONTEXT, mesh.solid_angle_props);

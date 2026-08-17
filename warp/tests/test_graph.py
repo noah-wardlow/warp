@@ -276,6 +276,8 @@ def test_graph_fill_drives_capture_while(test, device):
     End-to-end pattern from mujoco_warp's solver: ``fill_`` initializes a ``capture_while`` counter at the top of the
     graph. Each replay must reset the counter so the body runs the expected number of iterations.
     """
+    if device.is_hip or not wp.is_conditional_graph_supported():
+        test.skipTest("Conditional graph nodes (capture_while) are not supported on HIP/ROCm")
     counter = wp.empty(1, dtype=wp.int32, device=device)
     out = wp.zeros(1, dtype=wp.int32, device=device)
 
@@ -1449,23 +1451,30 @@ add_function_test(
 # CUDA-only tests
 cuda_devices = get_selected_cuda_test_devices_with_mempool()
 
+# Graph memory-allocation nodes — in-capture alloc/free node insertion and the
+# dependency-topology introspection built on it — require CUDA graph
+# MemAllocNode support. This is not wired up on HIP/ROCm: capture-time async
+# allocation does not surface a MemAllocNode, so wp_cuda_graph_insert_alloc_node
+# returns null on gfx1151. Scope these tests to non-HIP CUDA devices.
+graph_mem_node_devices = [device for device in cuda_devices if not device.is_hip]
+
 add_function_test(
     TestGraph,
     "test_cuda_graph_alloc_free_preserves_merged_frontier",
     test_cuda_graph_alloc_free_preserves_merged_frontier,
-    devices=cuda_devices,
+    devices=graph_mem_node_devices,
 )
 add_function_test(
     TestGraph,
     "test_cuda_graph_alloc_retained_release",
     test_cuda_graph_alloc_retained_release,
-    devices=cuda_devices,
+    devices=graph_mem_node_devices,
 )
 add_function_test(
     TestGraph,
     "test_cuda_graph_alloc_transient_stream",
     test_cuda_graph_alloc_transient_stream,
-    devices=cuda_devices,
+    devices=graph_mem_node_devices,
 )
 
 # CUDA graph topology tests.
@@ -1488,7 +1497,7 @@ _topo_tests = [
     test_cuda_graph_topo_alloc_free_serializes_dependent_streams_only,
 ]
 for _topo_test in _topo_tests:
-    add_function_test(TestGraph, _topo_test.__name__, _topo_test, devices=cuda_devices)
+    add_function_test(TestGraph, _topo_test.__name__, _topo_test, devices=graph_mem_node_devices)
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

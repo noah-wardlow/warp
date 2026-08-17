@@ -271,6 +271,17 @@ def test_atomic_cas_4d(test, device, dtype, register_kernels=False):
 
 devices = get_test_devices()
 
+# Every test in this file uses a global spinlock (repeated wp.atomic_cas to
+# acquire a single lock, then a critical section, then release). This pattern
+# requires independent thread scheduling: the thread that wins the lock must be
+# able to run and release it while the losers keep retrying. AMD RDNA (wave32)
+# executes a wavefront in lockstep with no independent thread scheduling, so the
+# lock holder cannot make progress while its wave-mates spin on the same lock ->
+# deadlock (the test hangs). wp.atomic_cas itself is correct on HIP; only this
+# lockstep-incompatible spinlock pattern is unsupported, so run these on
+# non-HIP devices only.
+spinlock_devices = [d for d in devices if not wp.get_device(d).is_hip]
+
 
 class TestAtomicCAS(unittest.TestCase):
     pass
@@ -282,17 +293,17 @@ np_test_types = (np.int32, np.uint32, np.int64, np.uint64, np.float32, np.float6
 for dtype in np_test_types:
     type_name = dtype.__name__
     add_function_test_register_kernel(
-        TestAtomicCAS, f"test_cas_{type_name}", test_atomic_cas, devices=devices, dtype=dtype
+        TestAtomicCAS, f"test_cas_{type_name}", test_atomic_cas, devices=spinlock_devices, dtype=dtype
     )
     # Add 2D test for each type
     add_function_test_register_kernel(
-        TestAtomicCAS, f"test_cas_2d_{type_name}", test_atomic_cas_2d, devices=devices, dtype=dtype
+        TestAtomicCAS, f"test_cas_2d_{type_name}", test_atomic_cas_2d, devices=spinlock_devices, dtype=dtype
     )
     add_function_test_register_kernel(
-        TestAtomicCAS, f"test_cas_3d_{type_name}", test_atomic_cas_3d, devices=devices, dtype=dtype
+        TestAtomicCAS, f"test_cas_3d_{type_name}", test_atomic_cas_3d, devices=spinlock_devices, dtype=dtype
     )
     add_function_test_register_kernel(
-        TestAtomicCAS, f"test_cas_4d_{type_name}", test_atomic_cas_4d, devices=devices, dtype=dtype
+        TestAtomicCAS, f"test_cas_4d_{type_name}", test_atomic_cas_4d, devices=spinlock_devices, dtype=dtype
     )
 
 if __name__ == "__main__":

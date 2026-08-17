@@ -323,6 +323,12 @@ class CheckOutput:
     def __enter__(self):
         # wp.force_load()
 
+        # Initialize before capturing. Module-load lines are filtered below, but
+        # the initialization banner is not, so it would be counted as unexpected
+        # output whenever this block is the first thing in a process to touch
+        # Warp. Initialization is idempotent.
+        wp.init()
+
         self.capture = StdOutCapture()
         self.capture.begin()
 

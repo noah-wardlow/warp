@@ -25,6 +25,11 @@ def test_large_launch_large_kernel(test, device):
     The function conditional sum will add 1 to result for every thread that has an i index of 0.
     Due to the size of the grid, this test is not run on CPUs
     """
+    if getattr(device, "is_hip", False):
+        # A 2**33-thread launch exceeds the maximum grid size the HIP/ROCm driver
+        # accepts on gfx1151 (the launch is rejected with "invalid argument").
+        test.skipTest("2**33-thread launch exceeds the maximum grid size on gfx1151")
+
     test_result = wp.zeros(shape=(1,), dtype=wp.uint64, device=device)
 
     large_dim_length = 2**16

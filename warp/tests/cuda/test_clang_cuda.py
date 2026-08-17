@@ -155,7 +155,10 @@ class TestClangCUDA(unittest.TestCase):
         wp.config.llvm_cuda = cls._saved_llvm_cuda
 
 
-devices = get_selected_cuda_test_devices()
+# These tests compile CUDA kernels with the bundled Clang/LLVM CUDA toolchain
+# (an nvcc alternative). That path is CUDA-only; HIP kernels compile through
+# hipRTC/hipcc, so scope these tests to non-HIP CUDA devices.
+devices = [device for device in get_selected_cuda_test_devices() if not device.is_hip]
 add_function_test(TestClangCUDA, "test_trivial_kernel", test_trivial_kernel, devices=devices)
 add_function_test(TestClangCUDA, "test_math_kernel", test_math_kernel, devices=devices)
 add_function_test(TestClangCUDA, "test_vec_kernel", test_vec_kernel, devices=devices)

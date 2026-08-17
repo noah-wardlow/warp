@@ -95,6 +95,13 @@ def test_tile_assign_2d_kernel(src: wp.array3d[float], dst: wp.array3d[float]):
 
 
 def test_tile_assign_2d(test, device):
+    # The differentiable 3D tile keeps both the data and gradient buffers of two
+    # (16, 32, 8) tiles in shared memory (~64 KB total plus framework overhead),
+    # which exceeds gfx1151's hard 64 KB LDS and faults the launch. Skip where it
+    # does not fit (sm_86 provides 100 KB).
+    if device.is_cuda and device.max_shared_memory_per_block < 66 * 1024:
+        test.skipTest("differentiable 3D tile needs ~64 KB + overhead of shared memory (exceeds gfx1151 LDS)")
+
     rng = np.random.default_rng(42)
 
     a = wp.array(rng.random((TILE_M, TILE_N, TILE_O), dtype=np.float32), requires_grad=True, device=device)

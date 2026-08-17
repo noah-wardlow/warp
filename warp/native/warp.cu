@@ -6,14 +6,20 @@
 #include "alloc_tracker.h"
 #include "apic.h"
 #include "apic_internal.h"
+#if defined(__HIP_PLATFORM_AMD__)
+#include <pthread.h>
+#endif
+
 #include "cuda_util.h"
 #include "error.h"
 #include "scan.h"
 #include "sort.h"
 
+#include <chrono>
 #include <cstdlib>
 #include <fstream>
 
+#if !defined(__HIP_PLATFORM_AMD__)
 #include <nvPTXCompiler.h>
 #include <nvrtc.h>
 #if WP_ENABLE_MATHDX
@@ -22,6 +28,7 @@
 #include <libcusolverdx.h>
 #include <libmathdx.h>
 #include <nvJitLink.h>
+#endif
 #endif
 
 #include <algorithm>
@@ -37,8 +44,16 @@
 
 #define check_any(result) (check_generic(result, __FILE__, __LINE__))
 #define check_nvrtc(code) (check_nvrtc_result(code, __FILE__, __LINE__))
+#if !defined(__HIP_PLATFORM_AMD__)
 #define check_nvptx(code) (check_nvptx_result(code, __FILE__, __LINE__))
+#else
+#define check_nvptx(code) (false)
+#endif
+#if WP_ENABLE_MATHDX && !defined(__HIP_PLATFORM_AMD__)
 #define check_nvjitlink(handle, code) (check_nvjitlink_result(handle, code, __FILE__, __LINE__))
+#else
+#define check_nvjitlink(handle, code) (false)
+#endif
 #define check_cufftdx(code) (check_cufftdx_result(code, __FILE__, __LINE__))
 #define check_cublasdx(code) (check_cublasdx_result(code, __FILE__, __LINE__))
 #define check_cusolver(code) (check_cusolver_result(code, __FILE__, __LINE__))
@@ -89,6 +104,7 @@ bool check_nvrtc_result(nvrtcResult result, const char* file, int line)
     return false;
 }
 
+#if !defined(__HIP_PLATFORM_AMD__)
 bool check_nvptx_result(nvPTXCompileResult result, const char* file, int line)
 {
     if (result == NVPTXCOMPILE_SUCCESS)
@@ -125,6 +141,7 @@ bool check_nvptx_result(nvPTXCompileResult result, const char* file, int line)
     fprintf(stderr, "Warp PTX compilation error %u: %s (%s:%d)\n", unsigned(result), error_string, file, line);
     return false;
 }
+#endif
 
 bool check_generic(int result, const char* file, int line)
 {
@@ -138,6 +155,7 @@ bool check_generic(int result, const char* file, int line)
 
 struct DeviceInfo {
     static constexpr int kNameLen = 128;
+    static constexpr int kArchLen = 32;
 
     CUdevice device = -1;
     CUuuid uuid = { 0 };
@@ -146,6 +164,7 @@ struct DeviceInfo {
     int pci_bus_id = -1;
     int pci_device_id = -1;
     char name[kNameLen] = "";
+    char arch_str[kArchLen] = "";
     int arch = 0;
     int is_uva = 0;
     int pageable_memory_access = 0;
@@ -154,6 +173,7 @@ struct DeviceInfo {
     int managed_memory = 0;
     int concurrent_managed_access = 0;
     int is_mempool_supported = 0;
+    int is_uma = 0;  // Unified Memory Architecture (APU/iGPU) — use managed memory
     int sm_count = 0;
     int is_ipc_supported = -1;
     int max_smem_bytes = 0;
@@ -227,6 +247,7 @@ static std::unordered_map<uint64_t, CaptureInfo*> g_captures;
 // See wp_alloc_device_async() and wp_free_device_async().
 static std::unordered_map<void*, GraphAllocInfo> g_graph_allocs;
 
+
 // Memory that cannot be freed immediately gets queued here.
 // Call free_deferred_allocs() to release.
 static std::vector<FreeInfo> g_deferred_free_list;
@@ -292,11 +313,30 @@ int cuda_init()
                 check_cu(cuDeviceGetAttribute_f(
                     &g_devices[i].is_mempool_supported, CU_DEVICE_ATTRIBUTE_MEMORY_POOLS_SUPPORTED, device
                 ));
+
+#if defined(__HIP_PLATFORM_AMD__)
+                // Detect Unified Memory Architecture (APU/iGPU with shared physical memory).
+                // ConcurrentManagedAccess indicates the GPU can coherently access managed memory
+                // concurrently with the CPU — true for APUs sharing the same DRAM.
+                // Note: hipDeviceAttributeIntegrated may misreport on some AMD APUs,
+                // so we use ConcurrentManagedAccess as the reliable UMA indicator.
+                // HIP-only: discrete NVIDIA GPUs also report ConcurrentManagedAccess=1
+                // (it indicates HMM support, not shared physical memory), which would
+                // misclassify every modern dGPU as UMA.
+                {
+                    int concurrent_managed = 0;
+                    if (cuDeviceGetAttribute_f(
+                            &concurrent_managed, CU_DEVICE_ATTRIBUTE_CONCURRENT_MANAGED_ACCESS, device
+                        )
+                        == CUDA_SUCCESS) {
+                        g_devices[i].is_uma = (concurrent_managed != 0) ? 1 : 0;
+                    }
+                }
+#endif
                 check_cu(
                     cuDeviceGetAttribute_f(&g_devices[i].sm_count, CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT, device)
                 );
-#ifdef CUDA_VERSION
-#if CUDA_VERSION >= 12000
+#if !defined(__HIP_PLATFORM_AMD__) && defined(CUDA_VERSION) && CUDA_VERSION >= 12000
                 int device_attribute_integrated = 0;
                 check_cu(cuDeviceGetAttribute_f(&device_attribute_integrated, CU_DEVICE_ATTRIBUTE_INTEGRATED, device));
                 if (device_attribute_integrated == 0) {
@@ -307,11 +347,31 @@ int cuda_init()
                     // integrated devices do not support CUDA IPC
                     g_devices[i].is_ipc_supported = 0;
                 }
+#else
+#if defined(__HIP_PLATFORM_AMD__)
+                g_devices[i].is_ipc_supported = 0;
+                int prev_device = -1;
+                if (hipGetDevice(&prev_device) == hipSuccess) {
+                    if (hipSetDevice(i) == hipSuccess) {
+                        void* ipc_ptr = nullptr;
+                        if (hipMalloc(&ipc_ptr, 4) == hipSuccess) {
+                            CUipcMemHandle mem_handle;
+                            if (cuIpcGetMemHandle_f(&mem_handle, (CUdeviceptr)ipc_ptr) == CUDA_SUCCESS) {
+                                g_devices[i].is_ipc_supported = 1;
+                            }
+                            ignore_cuda_error(hipFree(ipc_ptr));
+                        }
+                        ignore_cuda_error(hipSetDevice(prev_device));
+                    }
+                }
+#else
+                g_devices[i].is_ipc_supported = 0;
 #endif
 #endif
                 check_cu(cuDeviceGetAttribute_f(
                     &g_devices[i].max_smem_bytes, CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN, device
                 ));
+#if !defined(__HIP_PLATFORM_AMD__)
                 int major = 0;
                 int minor = 0;
                 check_cu(cuDeviceGetAttribute_f(&major, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR, device));
@@ -323,6 +383,17 @@ int cuda_init()
                     g_devices[i].arch = 101;  // Thor SM change
                 }
 #endif
+#endif
+#else
+                g_devices[i].arch = 0;
+#endif
+#if defined(__HIP_PLATFORM_AMD__)
+                cudaDeviceProp props;
+                if (check_cuda(cudaGetDeviceProperties(&props, i))) {
+                    snprintf(g_devices[i].arch_str, DeviceInfo::kArchLen, "%s", props.gcnArchName);
+                }
+#else
+                snprintf(g_devices[i].arch_str, DeviceInfo::kArchLen, "sm_%d", g_devices[i].arch);
 #endif
                 g_device_map[device] = &g_devices[i];
             } else {
@@ -355,6 +426,18 @@ static inline CUstream get_current_stream(void* context = NULL)
     return static_cast<CUstream>(wp_cuda_context_get_stream(context));
 }
 
+// Stream to use for stream-ordered deallocation (cudaFreeAsync).
+// CUDA: the NULL (legacy default) stream is synchronizing, so it safely
+// postpones the free past all prior work. HIP/ROCm: the NULL stream does
+// NOT synchronize with Warp's streams, so we must free on the current stream
+// to keep the deallocation ordered after the memory's last use (otherwise the
+// pool recycles in-use memory -> silent aliasing/corruption under churn).
+#if defined(__HIP_PLATFORM_AMD__)
+#define WP_HIP_FREE_STREAM(ctx) (get_current_stream(ctx))
+#else
+#define WP_HIP_FREE_STREAM(ctx) (NULL)
+#endif
+
 static ContextInfo* get_context_info(CUcontext ctx)
 {
     if (!ctx) {
@@ -379,6 +462,25 @@ static ContextInfo* get_context_info(CUcontext ctx)
                 void* dummy = NULL;
                 check_cuda(cudaMallocAsync(&dummy, 1, NULL));
                 check_cuda(cudaFreeAsync(dummy, NULL));
+
+#if defined(__HIP_PLATFORM_AMD__)
+                // gfx1151/ROCm: the async pool's default "opportunistic reuse"
+                // hands a just-freed block back to a new allocation before the
+                // free has actually completed on its stream. On ROCm 7.2 this
+                // aliases still-in-use memory -> silent corruption under
+                // allocation churn (whole classes of unit tests fail
+                // nondeterministically; disabling mempools entirely fixes it
+                // but breaks graph-capture allocation and hurts perf). Disable
+                // opportunistic / internal-dependency reuse so the pool only
+                // recycles memory whose free has completed, while keeping the
+                // pool's fast alloc/free path.
+                hipMemPool_t pool;
+                if (check_cuda(hipDeviceGetDefaultMemPool(&pool, device_info->ordinal))) {
+                    int disable = 0;
+                    hipMemPoolSetAttribute(pool, hipMemPoolReuseAllowOpportunistic, &disable);
+                    hipMemPoolSetAttribute(pool, hipMemPoolReuseAllowInternalDependencies, &disable);
+                }
+#endif
             }
 
             ContextInfo context_info;
@@ -456,7 +558,8 @@ static bool capturable_tmp_alloc(void* context, const void* data, size_t size, v
 
     if (capture_info) {
         // ongoing graph capture - need to stage the fill value so that it persists with the graph
-        if (CUDA_VERSION >= 12040 && wp_cuda_driver_version() >= 12040) {
+#if !defined(__HIP_PLATFORM_AMD__) && CUDA_VERSION >= 12040
+        if (wp_cuda_driver_version() >= 12040) {
             // pause the capture so that the alloc/memcpy won't be captured
             void* graph = NULL;
             if (!wp_cuda_graph_pause_capture(WP_CURRENT_CONTEXT, stream, &graph))
@@ -471,7 +574,7 @@ static bool capturable_tmp_alloc(void* context, const void* data, size_t size, v
                 );
                 return false;
             }
-            if (!check_cuda(cudaMemcpyAsync(devptr, data, size, cudaMemcpyHostToDevice, stream)))
+            if (!check_cuda(cudaMemcpyAsync(devptr, data, size, cudaMemcpyDefault, stream)))
                 return false;
 
             // graph takes ownership of the value storage
@@ -488,7 +591,9 @@ static bool capturable_tmp_alloc(void* context, const void* data, size_t size, v
                 return false;
 
             free_devptr = false;  // memory is owned by the graph, doesn't need to be freed
-        } else {
+        } else
+#endif
+        {
             // older CUDA can't pause/resume the capture, so stage in CPU memory
             void* hostptr = wp_alloc_host(size);
             if (!hostptr) {
@@ -509,7 +614,7 @@ static bool capturable_tmp_alloc(void* context, const void* data, size_t size, v
                 );
                 return false;
             }
-            if (!check_cuda(cudaMemcpyAsync(devptr, hostptr, size, cudaMemcpyHostToDevice, stream)))
+            if (!check_cuda(cudaMemcpyAsync(devptr, hostptr, size, cudaMemcpyDefault, stream)))
                 return false;
 
             // graph takes ownership of the value storage
@@ -531,7 +636,7 @@ static bool capturable_tmp_alloc(void* context, const void* data, size_t size, v
             );
             return false;
         }
-        if (!check_cuda(cudaMemcpyAsync(devptr, data, size, cudaMemcpyHostToDevice, stream)))
+        if (!check_cuda(cudaMemcpyAsync(devptr, data, size, cudaMemcpyDefault, stream)))
             return false;
     }
 
@@ -565,13 +670,13 @@ static int free_deferred_allocs(void* context = NULL)
 
             if (free_info.is_async) {
                 // this could be a regular stream-ordered allocation or a graph allocation
-                cudaError_t res = cudaFreeAsync(free_info.ptr, NULL);
+                cudaError_t res = cudaFreeAsync(free_info.ptr, WP_HIP_FREE_STREAM(free_info.context));
                 if (res != cudaSuccess) {
                     if (res == cudaErrorInvalidValue) {
                         // This can happen if we try to release the pointer but the graph was
                         // never launched, so the memory isn't mapped.
                         // This is fine, so clear the error.
-                        cudaGetLastError();
+                        ignore_cuda_error(cudaGetLastError());
                     } else {
                         // something else went wrong, report error
                         check_cuda(res);
@@ -744,21 +849,149 @@ void wp_free_pinned(void* ptr)
 {
     if (g_alloc_tracker.enabled && ptr)
         g_alloc_tracker.record_free(ptr);
-    cudaFreeHost(ptr);
+    // HIP returns an error (rather than deferring) when freeing pinned memory
+    // that is still referenced by a capturing graph; ignore it like free_device
+    ignore_cuda_error(cudaFreeHost(ptr));
 }
+
+#if defined(__HIP_PLATFORM_AMD__)
+// Pointers that wp_alloc_device served from the stream-ordered pool, which on
+// HIP happens only during graph capture. wp_free_device consults this so each
+// pointer goes back to the allocator it came from.
+//
+// Both low-level deallocators drop the pointer as well, because several call
+// sites free memory through them directly rather than through wp_free_device.
+// Leaving a stale entry behind is not harmless: the address gets handed out
+// again by the plain allocator, and the next wp_free_device would then release
+// a plain pointer through the pool and corrupt the heap.
+static std::unordered_set<void*> g_hip_pool_allocs;
+static std::mutex g_hip_pool_allocs_mutex;
+
+static void hip_pool_allocs_forget(void* ptr)
+{
+    if (!ptr)
+        return;
+    std::lock_guard<std::mutex> guard(g_hip_pool_allocs_mutex);
+    g_hip_pool_allocs.erase(ptr);
+}
+#endif
 
 void* wp_alloc_device(void* context, size_t s, const char* tag)
 {
     int ordinal = wp_cuda_context_get_device_ordinal(context);
 
+#if defined(__HIP_PLATFORM_AMD__)
+    // ROCm's stream-ordered pool hands a block freed on one stream to an
+    // allocation on another before the first stream has finished reading it, so
+    // concurrent work aliases live memory and quietly returns wrong answers.
+    // Warp's Python allocator already sidesteps this by using the plain
+    // allocator outside graph capture; the native half never did, which is why
+    // native structures (hash grids, sort scratch, meshes) still aliased.
+    //
+    // Do the same here. The pool is only needed during capture, where plain
+    // allocations are not capturable, so pointers served from it are tracked and
+    // freed the matching way.
+    if (wp_cuda_device_is_mempool_supported(ordinal)) {
+        if (!wp_cuda_stream_is_capturing(get_current_stream(context)))
+            return wp_alloc_device_default(context, s, tag);
+
+        void* ptr = wp_alloc_device_async(context, s, tag);
+        if (ptr) {
+            std::lock_guard<std::mutex> guard(g_hip_pool_allocs_mutex);
+            g_hip_pool_allocs.insert(ptr);
+        }
+        return ptr;
+    }
+    return wp_alloc_device_default(context, s, tag);
+#else
     if (wp_cuda_device_is_mempool_supported(ordinal))
         return wp_alloc_device_async(context, s, WP_CURRENT_STREAM, tag);
     else
         return wp_alloc_device_default(context, s, tag);
+#endif
 }
+
+#if defined(__HIP_PLATFORM_AMD__)
+
+// Pool of descriptor blocks, keyed by context and size.
+//
+// A BVH or Mesh id is the device address of its descriptor, so destroying one
+// object and creating another hands the same address to the new object. On HIP
+// that is where traversal breaks: a kernel reading a descriptor through a
+// recycled address can see the previous contents instead of the ones just
+// written, and an all-zero descriptor has a null root pointer, so the query
+// faults at address zero. Writing the descriptor from a kernel rather than a
+// copy does not help, nor does synchronizing before the free, nor disabling the
+// memory pool. What the fault tracks is the address being released and
+// re-acquired at all, so these blocks stay mapped for the life of the process.
+//
+// The cost is bounded by the high-water mark of concurrently live objects, at
+// one descriptor each.
+static std::mutex g_descriptor_pool_mutex;
+static std::map<std::pair<void*, size_t>, std::vector<void*>> g_descriptor_pool;
+
+void* wp_descriptor_alloc(void* context, size_t s, const char* tag)
+{
+    {
+        std::lock_guard<std::mutex> lock(g_descriptor_pool_mutex);
+        auto it = g_descriptor_pool.find({ context, s });
+        if (it != g_descriptor_pool.end() && !it->second.empty()) {
+            void* ptr = it->second.back();
+            it->second.pop_back();
+            return ptr;
+        }
+    }
+    return wp_alloc_device(context, s, tag);
+}
+
+void wp_descriptor_free(void* context, void* ptr, size_t s)
+{
+    if (!ptr)
+        return;
+    std::lock_guard<std::mutex> lock(g_descriptor_pool_mutex);
+    g_descriptor_pool[{ context, s }].push_back(ptr);
+}
+
+void wp_descriptor_pool_release(void* context)
+{
+    // The blocks are not freed individually: this runs while the context that
+    // owns them is being destroyed, which releases them anyway. Dropping the
+    // entries is what matters, so a later context that happens to reuse the
+    // handle does not get pointers belonging to the old one.
+    std::lock_guard<std::mutex> lock(g_descriptor_pool_mutex);
+    for (auto it = g_descriptor_pool.begin(); it != g_descriptor_pool.end();)
+        it = (it->first.first == context) ? g_descriptor_pool.erase(it) : std::next(it);
+}
+
+#else
+
+// CUDA recycles these addresses safely, so descriptors are allocated and freed
+// like any other device memory.
+void* wp_descriptor_alloc(void* context, size_t s, const char* tag) { return wp_alloc_device(context, s, tag); }
+
+void wp_descriptor_free(void* context, void* ptr, size_t s) { wp_free_device(context, ptr); }
+
+void wp_descriptor_pool_release(void* context) { }
+
+#endif  // __HIP_PLATFORM_AMD__
 
 void wp_free_device(void* context, void* ptr)
 {
+#if defined(__HIP_PLATFORM_AMD__)
+    // return the pointer to whichever allocator produced it; see wp_alloc_device
+    bool from_pool = false;
+    {
+        std::lock_guard<std::mutex> guard(g_hip_pool_allocs_mutex);
+        auto it = g_hip_pool_allocs.find(ptr);
+        from_pool = (it != g_hip_pool_allocs.end());
+        if (from_pool)
+            g_hip_pool_allocs.erase(it);
+    }
+    if (from_pool)
+        wp_free_device_async(context, ptr);
+    else
+        wp_free_device_default(context, ptr);
+#else
     int ordinal = wp_cuda_context_get_device_ordinal(context);
 
     // use stream-ordered allocator if available
@@ -766,6 +999,7 @@ void wp_free_device(void* context, void* ptr)
         wp_free_device_async(context, ptr);
     else
         wp_free_device_default(context, ptr);
+#endif
 }
 
 void* wp_alloc_device_default(void* context, size_t s, const char* tag)
@@ -780,8 +1014,34 @@ void* wp_alloc_device_default(void* context, size_t s, const char* tag)
     return ptr;
 }
 
+// UMA managed memory allocator — allocates via hipMallocManaged so the
+// allocation is registered in warp.so's HIP runtime (not Python's ctypes one).
+void* wp_alloc_managed_device(void* context, size_t s)
+{
+    ContextGuard guard(context);
+
+    void* ptr = NULL;
+    cudaError_t err = cudaMallocManaged(&ptr, s, cudaMemAttachGlobal);
+    if (err != cudaSuccess || ptr == NULL) {
+        return NULL;
+    }
+    return ptr;
+}
+
+void wp_free_managed_device(void* context, void* ptr)
+{
+    if (!ptr)
+        return;
+    ContextGuard guard(context);
+    cudaFree(ptr);
+}
+
 void wp_free_device_default(void* context, void* ptr)
 {
+#if defined(__HIP_PLATFORM_AMD__)
+    hip_pool_allocs_forget(ptr);
+#endif
+
     if (g_alloc_tracker.enabled && ptr)
         g_alloc_tracker.record_free(ptr);
 
@@ -886,6 +1146,10 @@ void* wp_alloc_device_managed(void* context, size_t s, const char* tag)
 
 void wp_free_device_async(void* context, void* ptr, void** dbg_node_ret)
 {
+#if defined(__HIP_PLATFORM_AMD__)
+    hip_pool_allocs_forget(ptr);
+#endif
+
     if (g_alloc_tracker.enabled && ptr)
         g_alloc_tracker.record_free(ptr);
 
@@ -907,7 +1171,13 @@ void wp_free_device_async(void* context, void* ptr, void** dbg_node_ret)
             // cudaFreeAsync on the null stream does not block or trigger synchronization, but it postpones
             // the deallocation until a synchronization point is reached, so preceding work on this pointer
             // should safely complete.
-            check_cuda(cudaFreeAsync(ptr, NULL));
+            //
+            // gfx1151/HIP: unlike CUDA, HIP's default (NULL) stream does NOT synchronize with Warp's
+            // streams, so cudaFreeAsync(ptr, NULL) recycles memory still in use on the current stream ->
+            // silent aliasing/corruption under allocation churn (whole classes of unit tests fail
+            // nondeterministically). Free on the current stream so the stream-ordered deallocation is
+            // correctly ordered after the memory's last use.
+            check_cuda(cudaFreeAsync(ptr, WP_HIP_FREE_STREAM(context)));
         } else {
             // We must defer the free operation until graph capture completes.
             deferred_free(ptr, context, true);
@@ -935,9 +1205,26 @@ void wp_free_device_async(void* context, void* ptr, void** dbg_node_ret)
                 return;
             }
 
+#if defined(__HIP_PLATFORM_AMD__)
+            // hipGraphAddMemFreeNode rejects pointers that came from
+            // hipMallocAsync during stream capture (hipErrorInvalidValue); it
+            // accepts only pointers from hipGraphAddMemAllocNode on explicitly
+            // constructed graphs. Freeing on the capturing stream instead lets
+            // the capture machinery record the free as a proper graph node.
+            if (wp_hip_graph_free_nodes_enabled()) {
+                check_cuda(cudaFreeAsync(ptr, capture->stream));
+                if (dbg_node_ret)
+                    *dbg_node_ret = NULL;
+                g_graph_allocs.erase(alloc_iter);
+                return;
+            }
+#endif
+
             cudaGraphNode_t free_node = NULL;
 
-            if (alloc_info.node) {
+            const bool add_free_node = alloc_info.node != NULL && wp_hip_graph_free_nodes_enabled();
+
+            if (add_free_node) {
                 // Find all leaf nodes that depend on the alloc node.
                 std::vector<cudaGraphNode_t> alloc_leaf_nodes;
                 if (!get_dependent_leaf_nodes(alloc_info.node, alloc_leaf_nodes)) {
@@ -1010,7 +1297,7 @@ void wp_free_device_async(void* context, void* ptr, void** dbg_node_ret)
                 // deallocating. This produces correct graphs, but may introduce unnecessary stream serialization with
                 // multi-stream captures.
                 std::vector<cudaGraphNode_t> leaf_nodes;
-                if (get_graph_leaf_nodes(graph, leaf_nodes)) {
+                if (wp_hip_graph_free_nodes_enabled() && get_graph_leaf_nodes(graph, leaf_nodes)) {
                     if (check_cuda(
                             cudaGraphAddMemFreeNode(&free_node, graph, leaf_nodes.data(), leaf_nodes.size(), ptr)
                         )) {
@@ -1034,12 +1321,12 @@ void wp_free_device_async(void* context, void* ptr, void** dbg_node_ret)
             if (alloc_info.graph_destroyed) {
                 if (g_captures.empty()) {
                     // try to free the pointer now
-                    cudaError_t res = cudaFreeAsync(ptr, NULL);
+                    cudaError_t res = cudaFreeAsync(ptr, WP_HIP_FREE_STREAM(context));
                     if (res == cudaErrorInvalidValue) {
                         // This can happen if we try to release the pointer but the graph was
                         // never launched, so the memory isn't mapped.
                         // This is fine, so clear the error.
-                        cudaGetLastError();
+                        ignore_cuda_error(cudaGetLastError());
                     } else {
                         // check for other errors
                         check_cuda(res);
@@ -1065,6 +1352,9 @@ void wp_free_device_async(void* context, void* ptr, void** dbg_node_ret)
 
 bool wp_memcpy_h2d(void* context, void* dest, void* src, size_t n, void* stream)
 {
+    if (n == 0)
+        return true;
+
     ContextGuard guard(context);
 
     CUstream cuda_stream;
@@ -1075,7 +1365,9 @@ bool wp_memcpy_h2d(void* context, void* dest, void* src, size_t n, void* stream)
 
     begin_cuda_range(WP_TIMING_MEMCPY, cuda_stream, context, "memcpy HtoD");
 
-    bool result = check_cuda(cudaMemcpyAsync(dest, src, n, cudaMemcpyHostToDevice, cuda_stream));
+    bool result = check_cuda(
+        cudaMemcpyAsync(dest, src, n, cudaMemcpyDefault, cuda_stream)
+    );  // cudaMemcpyDefault for managed ptr compat
 
     end_cuda_range(WP_TIMING_MEMCPY, cuda_stream);
 
@@ -1084,6 +1376,9 @@ bool wp_memcpy_h2d(void* context, void* dest, void* src, size_t n, void* stream)
 
 bool wp_memcpy_d2h(void* context, void* dest, void* src, size_t n, void* stream)
 {
+    if (n == 0)
+        return true;
+
     ContextGuard guard(context);
 
     CUstream cuda_stream;
@@ -1094,7 +1389,9 @@ bool wp_memcpy_d2h(void* context, void* dest, void* src, size_t n, void* stream)
 
     begin_cuda_range(WP_TIMING_MEMCPY, cuda_stream, context, "memcpy DtoH");
 
-    bool result = check_cuda(cudaMemcpyAsync(dest, src, n, cudaMemcpyDeviceToHost, cuda_stream));
+    bool result = check_cuda(
+        cudaMemcpyAsync(dest, src, n, cudaMemcpyDefault, cuda_stream)
+    );  // cudaMemcpyDefault for managed ptr compat
 
     end_cuda_range(WP_TIMING_MEMCPY, cuda_stream);
 
@@ -1113,7 +1410,7 @@ bool wp_memcpy_d2d(void* context, void* dest, void* src, size_t n, void* stream)
 
     begin_cuda_range(WP_TIMING_MEMCPY, cuda_stream, context, "memcpy DtoD");
 
-    bool result = check_cuda(cudaMemcpyAsync(dest, src, n, cudaMemcpyDeviceToDevice, cuda_stream));
+    bool result = check_cuda(cudaMemcpyAsync(dest, src, n, cudaMemcpyDefault, cuda_stream));
 
     end_cuda_range(WP_TIMING_MEMCPY, cuda_stream);
 
@@ -1184,14 +1481,14 @@ bool wp_memcpy_p2p(void* dst_context, void* dst, void* src_context, void* src, s
 
             if (result != cudaSuccess) {
                 // clear error in destination context
-                cudaGetLastError();
+                ignore_cuda_error(cudaGetLastError());
 
                 // try doing the copy in the source context
                 ContextGuard guard(src_context);
                 result = cudaMemcpyAsync(dst, src, n, cudaMemcpyDefault, cuda_stream);
 
                 // clear error in source context
-                cudaGetLastError();
+                ignore_cuda_error(cudaGetLastError());
             }
         }
 
@@ -1201,9 +1498,13 @@ bool wp_memcpy_p2p(void* dst_context, void* dst, void* src_context, void* src, s
                 // check if either of the pointers was allocated from a mempool
                 void* src_mempool = NULL;
                 void* dst_mempool = NULL;
-                cuPointerGetAttribute_f(&src_mempool, CU_POINTER_ATTRIBUTE_MEMPOOL_HANDLE, (CUdeviceptr)src);
-                cuPointerGetAttribute_f(&dst_mempool, CU_POINTER_ATTRIBUTE_MEMPOOL_HANDLE, (CUdeviceptr)dst);
-                cudaGetLastError();  // clear any errors
+                ignore_cu_result(
+                    cuPointerGetAttribute_f(&src_mempool, CU_POINTER_ATTRIBUTE_MEMPOOL_HANDLE, (CUdeviceptr)src)
+                );
+                ignore_cu_result(
+                    cuPointerGetAttribute_f(&dst_mempool, CU_POINTER_ATTRIBUTE_MEMPOOL_HANDLE, (CUdeviceptr)dst)
+                );
+                ignore_cuda_error(cudaGetLastError());  // clear any errors
                 // check if either of the pointers was allocated during graph capture
                 auto src_alloc = g_graph_allocs.find(src);
                 auto dst_alloc = g_graph_allocs.find(dst);
@@ -1243,8 +1544,12 @@ bool wp_memcpy_batch(void* context, void** dsts, void** srcs, size_t* sizes, siz
 
     bool result = true;
 
-#if CUDA_VERSION >= 12080
-    if (wp_cuda_driver_version() >= 12080) {
+#if WP_HAS_MEMCPY_BATCH
+    bool use_batch = true;
+#if !defined(__HIP_PLATFORM_AMD__)
+    use_batch = (wp_cuda_driver_version() >= 12080);
+#endif
+    if (use_batch) {
         CUmemcpyAttributes attr = {};
         attr.srcAccessOrder = CU_MEMCPY_SRC_ACCESS_ORDER_STREAM;
         // attr.flags = CU_MEMCPY_FLAG_PREFER_OVERLAP_WITH_COMPUTE;
@@ -1280,7 +1585,77 @@ __global__ void memset_kernel(int* dest, int value, size_t n)
 
 bool wp_memset_device(void* context, void* dest, int value, size_t n, void* stream)
 {
+    // HIP returns hipErrorInvalidValue for zero-size or null-dest memset;
+    // CUDA silently ignores these. Guard here for cross-platform compat.
+    if (n == 0 || dest == nullptr)
+        return true;
+
+    // DEBUG ENABLED via env var WP_DEBUG_MEMSET=1
+    static int debug_enabled = -1;
+    if (debug_enabled == -1) {
+        const char* e = getenv("WP_DEBUG_MEMSET");
+        debug_enabled = (e && e[0] == '1') ? 1 : 0;
+    }
+
     ContextGuard guard(context);
+
+    // gfx1151 quirk: hipMemsetAsync rejects managed pointers in warp's context.
+    // Use a compute kernel instead — runs on iGPU, no SDMA/stream restrictions.
+    cudaPointerAttributes attr;
+    cudaError_t pga_err = cudaPointerGetAttributes(&attr, dest);
+
+    if (debug_enabled) {
+        cudaStream_t cur_stream = get_current_stream();
+
+#if defined(__HIP_PLATFORM_AMD__)
+        // isManaged/allocationFlags exist only in HIP's pointer attributes
+        fprintf(
+            stderr,
+            "[WP_DEBUG memset] dest=%p n=%zu val=%d | "
+            "pga_err=%d attr.type=%d isManaged=%d device=%d "
+            "devPtr=%p hostPtr=%p flags=0x%x | stream=%p\n",
+            dest, n, value, (int)pga_err, (int)attr.type, (int)attr.isManaged, (int)attr.device, attr.devicePointer,
+            attr.hostPointer, (unsigned)attr.allocationFlags, (void*)cur_stream
+        );
+#else
+        fprintf(
+            stderr,
+            "[WP_DEBUG memset] dest=%p n=%zu val=%d | "
+            "pga_err=%d attr.type=%d device=%d "
+            "devPtr=%p hostPtr=%p | stream=%p\n",
+            dest, n, value, (int)pga_err, (int)attr.type, (int)attr.device, attr.devicePointer, attr.hostPointer,
+            (void*)cur_stream
+        );
+#endif
+        fflush(stderr);
+    }
+
+    if (pga_err == cudaSuccess
+#if defined(__HIP_PLATFORM_AMD__)
+        && attr.type == hipMemoryTypeManaged)
+#else
+        && attr.type == cudaMemoryTypeManaged)
+#endif
+    {
+        if (debug_enabled)
+            fprintf(stderr, "[WP_DEBUG memset] -> MANAGED PATH (kernel fill)\n");
+        // Word-fill via compute kernel. Allocations from CudaUmaHybridAllocator
+        // are always page-aligned (>= 4096) and sizes are >= 64KB (4-byte aligned).
+        const size_t num_words = n / 4;
+        int word_value = (value & 0xFF);
+        word_value |= (word_value << 8);
+        word_value |= (word_value << 16);
+        wp_launch_device(WP_CURRENT_CONTEXT, memset_kernel, num_words, ((int*)dest, word_value, num_words));
+
+        if (debug_enabled) {
+            cudaError_t after_err = cudaGetLastError();
+            fprintf(stderr, "[WP_DEBUG memset] kernel launch err=%d\n", (int)after_err);
+        }
+        return true;
+    }
+
+    if (debug_enabled)
+        fprintf(stderr, "[WP_DEBUG memset] -> STREAM PATH (cudaMemsetAsync)\n");
 
     cudaStream_t cuda_stream;
     if (stream != WP_CURRENT_STREAM)
@@ -2446,14 +2821,19 @@ int wp_cuda_toolkit_version() { return CUDA_VERSION; }
 
 int wp_nvrtc_version()
 {
+#if defined(__HIP_PLATFORM_AMD__)
+    // hipRTC doesn't expose a version function with the same signature; report toolkit version
+    return HIP_VERSION;
+#else
     int major = 0, minor = 0;
     nvrtcVersion(&major, &minor);
     return major * 1000 + minor * 10;
+#endif
 }
 
 const char* wp_libmathdx_version()
 {
-#if WP_ENABLE_MATHDX
+#if WP_ENABLE_MATHDX && !defined(__HIP_PLATFORM_AMD__)
     static char version[64];
     snprintf(version, sizeof(version), "%d.%d.%d", LIBMATHDX_VER_MAJOR, LIBMATHDX_VER_MINOR, LIBMATHDX_VER_PATCH);
     return version;
@@ -2509,11 +2889,11 @@ const char* wp_cuda_device_get_name(int ordinal)
     return NULL;
 }
 
-int wp_cuda_device_get_arch(int ordinal)
+const char* wp_cuda_device_get_arch(int ordinal)
 {
     if (ordinal >= 0 && ordinal < int(g_devices.size()))
-        return g_devices[ordinal].arch;
-    return 0;
+        return g_devices[ordinal].arch_str;
+    return NULL;
 }
 
 int wp_cuda_device_get_sm_count(int ordinal)
@@ -2635,6 +3015,54 @@ int wp_cuda_pointer_get_memory_kind(void* context, void* ptr)
         return WP_MEMORY_KIND_CUDA_MEMPOOL;
 
     return WP_MEMORY_KIND_CUDA_DEVICE;
+}
+
+// Mark a managed range coarse-grained. Returns 1 on success, 0 otherwise.
+//
+// The hardware float atomic (global_atomic_add_f32) is executed in the GPU's L2
+// cache. Host-coherent (fine-grained) pages are mapped so device accesses bypass
+// L2, which leaves that instruction with nothing to execute on: it retires
+// silently and discards every update, measurably losing 100% of a contended sum.
+// Integer atomics are unaffected because the fabric implements them, and the
+// compare-and-swap paths are unaffected because they are integer operations.
+//
+// Coarse-grained managed memory is cached in L2, so the float atomic works, and
+// it stays host-readable at synchronization boundaries, which is all a readback
+// needs. The trade is that it is no longer coherent with concurrent CPU access
+// while a kernel runs.
+int wp_cuda_set_memory_coarse_grain(void* context, void* ptr, size_t size)
+{
+#if defined(__HIP_PLATFORM_AMD__)
+    if (!ptr || size == 0)
+        return 0;
+
+    ContextGuard guard(context);
+
+    // Only managed ranges. hipMemAdvise will otherwise happily re-map ordinary
+    // host memory, which is not this function's business and would change the
+    // coherence of an allocation Warp does not own.
+    unsigned int is_managed = 0;
+    CUresult managed_result
+        = cuPointerGetAttribute_f(&is_managed, CU_POINTER_ATTRIBUTE_IS_MANAGED, reinterpret_cast<CUdeviceptr>(ptr));
+    if (managed_result != CUDA_SUCCESS || !is_managed)
+        return 0;
+
+    int ordinal = wp_cuda_context_get_device_ordinal(context);
+    hipError_t err = hipMemAdvise(ptr, size, hipMemAdviseSetCoarseGrain, ordinal);
+    return err == hipSuccess ? 1 : 0;
+#else
+    (void)context;
+    (void)ptr;
+    (void)size;
+    return 0;
+#endif
+}
+
+int wp_cuda_device_is_uma(int ordinal)
+{
+    if (ordinal >= 0 && ordinal < int(g_devices.size()))
+        return g_devices[ordinal].is_uma;
+    return 0;
 }
 
 int wp_cuda_device_is_mempool_supported(int ordinal)
@@ -2869,6 +3297,10 @@ void wp_cuda_context_destroy(void* context)
 
             g_contexts.erase(ctx);
         }
+
+#if defined(__HIP_PLATFORM_AMD__)
+        wp_descriptor_pool_release(ctx);
+#endif
 
         check_cu(cuCtxDestroy_f(ctx));
     }
@@ -3548,8 +3980,8 @@ bool wp_cuda_graph_end_capture(void* context, void* stream, void** graph_ret)
         // make sure we terminate the capture
         if (!external) {
             cudaGraph_t graph = NULL;
-            cudaStreamEndCapture(cuda_stream, &graph);
-            cudaGetLastError();
+            ignore_cuda_error(cudaStreamEndCapture(cuda_stream, &graph));
+            ignore_cuda_error(cudaGetLastError());
         }
     };
 
@@ -3641,19 +4073,67 @@ bool wp_capture_debug_dot_print(void* graph, const char* path, uint32_t flags)
     return true;
 }
 
+#if defined(__HIP_PLATFORM_AMD__)
+// gfx1151 / ROCm 7.2.x workaround: hip::Graph::ScheduleOneNode is implemented
+// recursively in libamdhip64.so. Long dependency chains (e.g. Newton's
+// differentiable simulation with many sim_substeps) overflow the default 8 MB
+// thread stack. Run hipGraphInstantiateWithFlags on a worker thread with a
+// 64 MB stack to dodge the recursion limit. graph_exec is cached after first
+// instantiation, so the ~100 us thread overhead is paid once per graph.
+struct WpHipGraphInstantiateArgs {
+    void* context;
+    cudaGraph_t graph;
+    cudaGraphExec_t* exec_out;
+    bool* success_out;
+};
+
+static void* wp_hip_graph_instantiate_worker(void* p)
+{
+    auto* a = static_cast<WpHipGraphInstantiateArgs*>(p);
+    ContextGuard guard(a->context);
+    // Freeing on the capturing stream records a free in the graph, so the graph
+    // already reclaims its own allocations; leaving AutoFreeOnLaunch on as well
+    // reclaims them twice and crashes inside hipGraphLaunch.
+    const unsigned int flags
+        = wp_hip_graph_free_nodes_enabled() ? 0u : (unsigned int)cudaGraphInstantiateFlagAutoFreeOnLaunch;
+    *a->success_out = check_cuda(cudaGraphInstantiateWithFlags(a->exec_out, a->graph, flags));
+    return nullptr;
+}
+#endif
+
 bool wp_cuda_graph_create_exec(void* context, void* stream, void* graph, void** graph_exec_ret)
 {
-    ContextGuard guard(context);
-
     cudaGraphExec_t graph_exec = NULL;
+
+#if defined(__HIP_PLATFORM_AMD__)
+    bool inst_ok = false;
+    WpHipGraphInstantiateArgs args = { context, (cudaGraph_t)graph, &graph_exec, &inst_ok };
+
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setstacksize(&attr, 64u * 1024u * 1024u);
+
+    pthread_t tid;
+    int rc = pthread_create(&tid, &attr, wp_hip_graph_instantiate_worker, &args);
+    pthread_attr_destroy(&attr);
+    if (rc != 0) {
+        wp::set_error_string("pthread_create failed during graph instantiation");
+        return false;
+    }
+    pthread_join(tid, nullptr);
+    if (!inst_ok)
+        return false;
+#else
+    ContextGuard guard_inst(context);
     if (!check_cuda(
             cudaGraphInstantiateWithFlags(&graph_exec, (cudaGraph_t)graph, cudaGraphInstantiateFlagAutoFreeOnLaunch)
         ))
         return false;
+#endif
 
-    // Usually uploading the graph explicitly is optional, but when updating graph nodes (e.g., indirect dispatch)
-    // then the upload is required because otherwise the graph nodes that get updated might not yet be uploaded, which
-    // results in undefined behavior.
+    // Upload runs on the calling thread to preserve stream affinity. Upload is
+    // not recursive in HIP so the calling thread's stack is sufficient.
+    ContextGuard guard_upload(context);
     CUstream cuda_stream = static_cast<CUstream>(stream);
     if (!check_cuda(cudaGraphUpload(graph_exec, cuda_stream)))
         return false;
@@ -3902,7 +4382,7 @@ int wp_cuda_graph_alloc_query(void* alloc_node, void* query_node)
 }
 
 // Support for conditional graph nodes available with CUDA 12.4+.
-#if CUDA_VERSION >= 12040
+#if !defined(__HIP_PLATFORM_AMD__) && CUDA_VERSION >= 12040
 
 // CUBIN or PTX data for compiled conditional modules, loaded on demand, keyed on device architecture
 using ModuleKey = std::pair<int, bool>;  // <arch, use_ptx>
@@ -4598,7 +5078,7 @@ bool write_file(const char* data, size_t size, std::string filename, const char*
     }
 }
 
-#if WP_ENABLE_MATHDX
+#if WP_ENABLE_MATHDX && !defined(__HIP_PLATFORM_AMD__)
 bool check_nvjitlink_result(nvJitLinkHandle handle, nvJitLinkResult result, const char* file, int line)
 {
     if (result != NVJITLINK_SUCCESS) {
@@ -4644,6 +5124,191 @@ size_t wp_cuda_compile_program(
     int* ltoir_input_types
 )
 {
+#if defined(__HIP_PLATFORM_AMD__)
+    (void)verify_fp;
+    (void)ltoirs;
+    (void)ltoir_sizes;
+    (void)ltoir_input_types;
+    (void)pch_dir;
+
+    if (!cuda_src || !program_name || !output_path) {
+        fprintf(stderr, "Warp HIP error: Invalid arguments to wp_cuda_compile_program\n");
+        return size_t(-1);
+    }
+
+    if (precompiled_headers) {
+        fprintf(stderr, "Warp warning: HIPRTC does not support precompiled headers, ignoring request\n");
+    }
+    if (num_ltoirs > 0) {
+        fprintf(stderr, "Warp warning: HIPRTC LTO inputs are not supported, ignoring %zu inputs\n", num_ltoirs);
+    }
+
+    nvrtcProgram prog;
+    nvrtcResult res = nvrtcCreateProgram(&prog, cuda_src, program_name, 0, nullptr, nullptr);
+    if (!check_nvrtc(res))
+        return size_t(res);
+
+    std::vector<std::string> stored_options;
+    std::vector<const char*> opts;
+
+    // Reserve enough space to prevent vector reallocation which would invalidate c_str() pointers
+    stored_options.reserve(20 + num_cuda_include_dirs);
+
+    if (arch_suffix && arch_suffix[0]) {
+        stored_options.push_back(std::string("--gpu-architecture=") + arch_suffix);
+        opts.push_back(stored_options.back().c_str());
+    }
+
+    if (include_dir && include_dir[0]) {
+        stored_options.push_back(std::string("-I") + include_dir);
+        opts.push_back(stored_options.back().c_str());
+    }
+
+    for (int i = 0; i < num_cuda_include_dirs; ++i) {
+        if (cuda_include_dirs && cuda_include_dirs[i]) {
+            stored_options.push_back(std::string("-I") + cuda_include_dirs[i]);
+            opts.push_back(stored_options.back().c_str());
+        }
+    }
+
+    stored_options.push_back("--std=c++17");
+    opts.push_back(stored_options.back().c_str());
+
+    // HIP: prevent hipRTC optimizer from hanging on deeply-nested template
+    // instantiations (e.g. hipcub::DeviceReduce, Newton VBD solver kernels).
+    // Without these flags, hipRTC can stall for 30+ minutes on a single kernel.
+    // Matches the flags used in the AOT build path (build_dll.py hip_fp_flags).
+    stored_options.push_back("-fno-finite-math-only");
+    opts.push_back(stored_options.back().c_str());
+    stored_options.push_back("-fno-associative-math");
+    opts.push_back(stored_options.back().c_str());
+    stored_options.push_back("-fno-reciprocal-math");
+    opts.push_back(stored_options.back().c_str());
+    stored_options.push_back("-fno-strict-aliasing");
+    opts.push_back(stored_options.back().c_str());
+
+#if defined(__HIP_PLATFORM_AMD__)
+    // Disable RDNA3.5 "true16" 16-bit register mode. ROCm 7.2's AMDGPU backend
+    // misallocates the _hi16/_lo16 subregisters it produces for packed
+    // float16/bfloat16 code, failing at -O2/-O3 with "Illegal instruction:
+    // Operand has incorrect register class" on kernels that mix half-precision
+    // vector/matrix ops (e.g. test_vec_scalar_ops). Forcing 16-bit ops through
+    // 32-bit registers avoids the buggy allocation; the AOT build passes the
+    // same flag (build_dll.py).
+    stored_options.push_back("-Xclang");
+    opts.push_back(stored_options.back().c_str());
+    stored_options.push_back("-target-feature");
+    opts.push_back(stored_options.back().c_str());
+    stored_options.push_back("-Xclang");
+    opts.push_back(stored_options.back().c_str());
+    stored_options.push_back("-real-true16");
+    opts.push_back(stored_options.back().c_str());
+#endif  // defined(__HIP_PLATFORM_AMD__)
+
+    if (debug) {
+        stored_options.push_back("-O0");
+        opts.push_back(stored_options.back().c_str());
+        stored_options.push_back("-g");
+        opts.push_back(stored_options.back().c_str());
+    } else if (optimization_level >= 0) {
+        stored_options.push_back(std::string("-O") + std::to_string(optimization_level));
+        opts.push_back(stored_options.back().c_str());
+    }
+
+    if (!debug) {
+        // Match NVRTC (and the warp_rocm port): define NDEBUG in release mode.
+        // Without it, device-side assert() in array.h/builtin.h stays live in
+        // every JIT kernel: ~3.3x larger code objects and ~2x slower simulation
+        // kernels measured on gfx1151 (mujoco-warp humanoid at 1024 worlds).
+        stored_options.push_back("-DNDEBUG");
+        opts.push_back(stored_options.back().c_str());
+    }
+
+    // Enable the floating-point verification checks (array.h/builtin.h FP_CHECK)
+    // when requested, matching the NVRTC path (--define-macro=WP_VERIFY_FP). The
+    // checks printf on non-finite values; their assert(0) is a no-op under NDEBUG.
+    if (verify_fp) {
+        stored_options.push_back("-DWP_VERIFY_FP");
+        opts.push_back(stored_options.back().c_str());
+    }
+
+    if (fast_math) {
+        stored_options.push_back("-ffast-math");
+        opts.push_back(stored_options.back().c_str());
+    }
+
+    if (fuse_fp) {
+        stored_options.push_back("-ffp-contract=fast");
+        opts.push_back(stored_options.back().c_str());
+    }
+
+    if (lineinfo) {
+        stored_options.push_back("-gline-tables-only");
+        opts.push_back(stored_options.back().c_str());
+    }
+
+    if (verbose) {
+        fprintf(stdout, "HIPRTC options:\n");
+        for (auto option : opts)
+            fprintf(stdout, "%s\n", option);
+    }
+
+    std::chrono::steady_clock::time_point compile_start;
+    if (compile_time_trace)
+        compile_start = std::chrono::steady_clock::now();
+
+    res = nvrtcCompileProgram(prog, int(opts.size()), opts.data());
+
+    if (compile_time_trace) {
+        const auto compile_end = std::chrono::steady_clock::now();
+        const double compile_ms = std::chrono::duration<double, std::milli>(compile_end - compile_start).count();
+        const std::string trace_path = std::string(output_path) + "_compile-time-trace.json";
+        const std::string trace = std::string("{\n") + "  \"tool\": \"hiprtc\",\n"
+            + "  \"compile_ms\": " + std::to_string(compile_ms) + ",\n"
+            + "  \"result\": " + std::to_string(static_cast<int>(res)) + "\n" + "}\n";
+        if (!write_file(trace.data(), trace.size(), trace_path, "wb")) {
+            fprintf(stderr, "Warp warning: Failed to write HIPRTC compile_time_trace to '%s'\n", trace_path.c_str());
+        }
+    }
+
+    if (res != NVRTC_SUCCESS || verbose) {
+        size_t log_size = 0;
+        if (check_nvrtc(nvrtcGetProgramLogSize(prog, &log_size)) && log_size > 0) {
+            std::vector<char> log(log_size);
+            if (check_nvrtc(nvrtcGetProgramLog(prog, log.data()))) {
+                if (res != NVRTC_SUCCESS)
+                    fprintf(stderr, "%s", log.data());
+                else
+                    fprintf(stdout, "%s", log.data());
+            }
+        }
+
+        if (res != NVRTC_SUCCESS) {
+            nvrtcDestroyProgram(&prog);
+            return size_t(res);
+        }
+    }
+
+    size_t code_size = 0;
+    if (!check_nvrtc(nvrtcGetPTXSize(prog, &code_size))) {
+        nvrtcDestroyProgram(&prog);
+        return size_t(-1);
+    }
+
+    std::vector<char> code(code_size);
+    if (!check_nvrtc(nvrtcGetPTX(prog, code.data()))) {
+        nvrtcDestroyProgram(&prog);
+        return size_t(-1);
+    }
+
+    if (!write_file(code.data(), code.size(), output_path, "wb")) {
+        nvrtcDestroyProgram(&prog);
+        return size_t(-1);
+    }
+
+    check_nvrtc(nvrtcDestroyProgram(&prog));
+    return res;
+#else
     // use file extension to determine whether to output PTX or CUBIN
     const char* output_ext = strrchr(output_path, '.');
     bool use_ptx = output_ext && strcmp(output_ext + 1, "ptx") == 0;
@@ -4666,6 +5331,7 @@ size_t wp_cuda_compile_program(
         int minor = 0;
         nvrtcVersion(&major, &minor);
         printf("NVRTC version %d.%d\n", major, minor);
+        printf("Kernel cache directory: %s\n", pch_dir);
     }
 
     char include_opt[max_path];
@@ -4986,6 +5652,7 @@ size_t wp_cuda_compile_program(
     check_nvrtc(nvrtcDestroyProgram(&prog));
 
     return res;
+#endif
 }
 
 #if WP_ENABLE_MATHDX
@@ -5313,6 +5980,15 @@ void* wp_cuda_load_module(void* context, const char* path)
     CUmodule module = NULL;
 
     if (load_ptx) {
+#if defined(__HIP_PLATFORM_AMD__)
+        if (!check_cu(cuModuleLoadDataEx_f(&module, input.data(), 0, NULL, NULL))) {
+            fprintf(
+                stderr,
+                "Warp error: Failed to load HIP code object from '%s'. PTX is not supported on HIP; use HSACO.\n", path
+            );
+            return NULL;
+        }
+#else
         if (check_cu(cuDriverGetVersion_f(&driver_cuda_version)) && driver_cuda_version >= CUDA_VERSION) {
             // let the driver compile the PTX
 
@@ -5375,6 +6051,7 @@ void* wp_cuda_load_module(void* context, const char* path)
                 return NULL;
             }
         }
+#endif
     } else {
         // load CUBIN
         if (!check_cu(cuModuleLoadDataEx_f(&module, input.data(), 0, NULL, NULL))) {
@@ -5491,6 +6168,13 @@ int wp_cuda_get_max_cluster_dim(void* context, void* kernel, int block_dim, int 
     if (!kernel || !context)
         return 1;
 
+#if defined(__HIP_PLATFORM_AMD__)
+    // gfx1151 (and RDNA generally) has no thread-block clusters.
+    (void)block_dim;
+    (void)dynamic_smem_bytes;
+    return 1;
+#else
+
     ContextGuard guard(context);
 
     // Opt into non-portable cluster sizes so probes above 8 are valid on
@@ -5546,6 +6230,7 @@ int wp_cuda_get_max_cluster_dim(void* context, void* kernel, int block_dim, int 
     cuFuncSetAttribute_f((CUfunction)kernel, non_portable_attr, prior_non_portable);
 
     return max_cluster_dim;
+#endif  // defined(__HIP_PLATFORM_AMD__)
 }
 
 void* wp_cuda_get_kernel(void* context, void* module, const char* name)
@@ -5605,7 +6290,18 @@ size_t wp_cuda_launch_kernel(
         // number of clusters (the loop still covers every work item).
         int natural_grid_dim = (dim + block_dim - 1) / block_dim;
         int grid_dim = natural_grid_dim;
+#if defined(__HIP_PLATFORM_AMD__)
+        // HSA sizes a dispatch grid in work items, not blocks, and caps each
+        // dimension at 2**32-1. CUDA's gridDim.x limit of 2**31-1 counts blocks,
+        // so using it here asks for a grid hundreds of times larger than the
+        // hardware accepts and the launch fails with an invalid argument. The
+        // grid-stride loop covers every work item whatever the grid size, so
+        // capping lower costs nothing.
+        const int device_cap = (int)(0xFFFFFFFFull / (unsigned int)block_dim);
+        int cap = (max_blocks > 0 && max_blocks < device_cap) ? max_blocks : device_cap;
+#else
         int cap = (max_blocks > 0) ? max_blocks : 2147483647;
+#endif
         if (grid_dim < 0)
             grid_dim = cap;
         else if (grid_dim > cap)
@@ -5736,8 +6432,37 @@ bool wp_cuda_get_suggested_block_size(
 
     int min_grid_size = 0;
     int block_size = 0;
+
+    // Bound the search by the function's own maximum block size, which is what
+    // a kernel declared with __launch_bounds__ reports. CUDA's occupancy
+    // calculator already consults that attribute, so passing it changes
+    // nothing there; HIP's does not, and without it a kernel built with
+    // __launch_bounds__(128) is told to use 1024 threads — above the limit it
+    // was compiled for.
+    int block_size_limit = 0;
+    int max_threads_per_block = 0;
+#if defined(__HIP_PLATFORM_AMD__)
+    // Call hipFuncGetAttribute directly rather than through cuFuncGetAttribute_f:
+    // the wrapper is compiled in a plain C++ translation unit where
+    // CUfunction_attribute resolves to a different type than it does in this HIP
+    // translation unit, so a call from here compiles but does not link. Every
+    // other use of that wrapper sits in a CUDA-only branch, which is why this is
+    // the first place it bites.
+    if (hipFuncGetAttribute(&max_threads_per_block, HIP_FUNC_ATTRIBUTE_MAX_THREADS_PER_BLOCK, (hipFunction_t)kernel)
+            == hipSuccess
+        && max_threads_per_block > 0) {
+        block_size_limit = max_threads_per_block;
+    }
+#else
+    if (cuFuncGetAttribute_f(&max_threads_per_block, CU_FUNC_ATTRIBUTE_MAX_THREADS_PER_BLOCK, (CUfunction)kernel)
+            == CUDA_SUCCESS
+        && max_threads_per_block > 0) {
+        block_size_limit = max_threads_per_block;
+    }
+#endif
+
     CUresult res = cuOccupancyMaxPotentialBlockSize_f(
-        &min_grid_size, &block_size, (CUfunction)kernel, NULL, shared_memory_bytes, 0
+        &min_grid_size, &block_size, (CUfunction)kernel, NULL, shared_memory_bytes, block_size_limit
     );
 
     if (!check_cu(res))
@@ -5770,7 +6495,11 @@ void wp_cuda_graphics_device_ptr_and_size(void* context, void* resource, uint64_
     size_t bytes;
     check_cu(cuGraphicsResourceGetMappedPointer_f(&device_ptr, &bytes, *(CUgraphicsResource*)resource));
 
+#if defined(__HIP_PLATFORM_AMD__)
+    *ptr = reinterpret_cast<uint64_t>(device_ptr);
+#else
     *ptr = device_ptr;
+#endif
     *size = bytes;
 }
 
@@ -5814,6 +6543,7 @@ uint64_t wp_cuda_graphics_sub_resource_get_mapped_array(
     );
     return reinterpret_cast<uint64_t>(cuda_array);
 }
+
 
 void wp_cuda_graphics_unregister_resource(void* context, void* resource)
 {
