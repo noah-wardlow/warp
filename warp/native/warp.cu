@@ -3823,7 +3823,29 @@ void* wp_cuda_event_create(void* context, unsigned flags)
         return NULL;
 }
 
-void wp_cuda_event_destroy(void* event) { check_cu(cuEventDestroy_f(static_cast<CUevent>(event))); }
+#if defined(__HIP_PLATFORM_AMD__)
+// Events recorded with the external flag during graph capture. On ROCm, a
+// replayed external event-record node updates the event only when the node
+// executes; the host-visible state is not marked pending at graph launch the
+// way CUDA does it, so hipEventSynchronize can return before the replayed
+// record and the caller reads data the graph has not written yet. Host
+// synchronization on such an event falls back to a device synchronize.
+// Leaked deliberately: an event destroyed during interpreter teardown must
+// not race static destruction of this bookkeeping.
+static std::unordered_set<CUevent>& g_hip_external_capture_events = *new std::unordered_set<CUevent>();
+static std::mutex& g_hip_external_capture_events_mutex = *new std::mutex();
+#endif  // defined(__HIP_PLATFORM_AMD__)
+
+void wp_cuda_event_destroy(void* event)
+{
+#if defined(__HIP_PLATFORM_AMD__)
+    {
+        std::lock_guard<std::mutex> lock(g_hip_external_capture_events_mutex);
+        g_hip_external_capture_events.erase(static_cast<CUevent>(event));
+    }
+#endif  // defined(__HIP_PLATFORM_AMD__)
+    check_cu(cuEventDestroy_f(static_cast<CUevent>(event)));
+}
 
 int wp_cuda_event_query(void* event)
 {
@@ -3845,12 +3867,35 @@ void wp_cuda_event_record(void* event, void* stream, bool external)
         check_cu(cuEventRecordWithFlags_f(
             static_cast<CUevent>(event), static_cast<CUstream>(stream), CU_EVENT_RECORD_EXTERNAL
         ));
+#if defined(__HIP_PLATFORM_AMD__)
+        std::lock_guard<std::mutex> lock(g_hip_external_capture_events_mutex);
+        g_hip_external_capture_events.insert(static_cast<CUevent>(event));
+#endif  // defined(__HIP_PLATFORM_AMD__)
     } else {
         check_cu(cuEventRecord_f(static_cast<CUevent>(event), static_cast<CUstream>(stream)));
     }
 }
 
-void wp_cuda_event_synchronize(void* event) { check_cu(cuEventSynchronize_f(static_cast<CUevent>(event))); }
+void wp_cuda_event_synchronize(void* event)
+{
+#if defined(__HIP_PLATFORM_AMD__)
+    // See g_hip_external_capture_events: a replayed external record does not
+    // gate hipEventSynchronize until its node executes, so waiting on the
+    // event alone can return stale results. A device synchronize is stronger
+    // than CUDA's per-event wait but is the only correct host-side wait
+    // available here.
+    bool recorded_in_graph;
+    {
+        std::lock_guard<std::mutex> lock(g_hip_external_capture_events_mutex);
+        recorded_in_graph = g_hip_external_capture_events.count(static_cast<CUevent>(event)) != 0;
+    }
+    if (recorded_in_graph) {
+        check_cuda(hipDeviceSynchronize());
+        return;
+    }
+#endif  // defined(__HIP_PLATFORM_AMD__)
+    check_cu(cuEventSynchronize_f(static_cast<CUevent>(event)));
+}
 
 float wp_cuda_event_elapsed_time(void* start_event, void* end_event)
 {
