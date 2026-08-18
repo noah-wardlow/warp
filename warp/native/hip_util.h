@@ -618,12 +618,6 @@ using CUaddress_mode = HIPaddress_mode;
 #define CU_RESOURCE_TYPE_ARRAY HIP_RESOURCE_TYPE_ARRAY
 #endif  // CU_RESOURCE_TYPE_ARRAY
 
-#ifndef CU_MEMORYTYPE_HOST
-#define CU_MEMORYTYPE_HOST hipMemoryTypeHost
-#endif  // CU_MEMORYTYPE_HOST
-#ifndef CU_MEMORYTYPE_ARRAY
-#define CU_MEMORYTYPE_ARRAY hipMemoryTypeArray
-#endif  // CU_MEMORYTYPE_ARRAY
 #else
 using CUDA_MEMCPY2D = HIP_MEMCPY2D;
 using CUDA_MEMCPY3D = HIP_MEMCPY3D;
