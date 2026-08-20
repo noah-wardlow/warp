@@ -161,7 +161,7 @@ def default_suite(test_loader: unittest.TestLoader = unittest.defaultTestLoader)
     from warp.tests.test_array_reduce import TestArrayReduce
     from warp.tests.test_atomic import TestAtomic
     from warp.tests.test_atomic_bitwise import TestAtomicBitwise
-    # from warp.tests.test_atomic_cas import TestAtomicCAS  # SKIP: hipRTC hang on gfx1151
+    from warp.tests.test_atomic_cas import TestAtomicCAS
     from warp.tests.test_bf16 import TestBf16, TestBf16MlDtypes
     from warp.tests.test_block_dim_dispatch import TestBlockDimDispatch
     from warp.tests.test_bool import TestBool
@@ -305,7 +305,7 @@ def default_suite(test_loader: unittest.TestLoader = unittest.defaultTestLoader)
         TestAsync,
         TestAtomic,
         TestAtomicBitwise,
-        # TestAtomicCAS,  # SKIP: hipRTC hang on gfx1151
+        TestAtomicCAS,
         TestBf16,
         TestBf16MlDtypes,
         TestBlockDimDispatch,
