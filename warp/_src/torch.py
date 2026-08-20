@@ -217,7 +217,7 @@ def from_torch(
         sync: Whether to synchronize PyTorch's stream before Warp uses the tensor.
           This ensures any pending PyTorch operations on the tensor are complete.
           Set to False if you know the tensor is not being modified by PyTorch.
-          Default is True for correctness on AMD/HIP platforms.
+          Default is None, which syncs only on AMD/HIP platforms where stream semantics require it.
 
     Returns:
         The wrapped array or array descriptor.
