@@ -6284,7 +6284,7 @@ bool wp_cuda_configure_kernel_shared_memory(void* kernel, int size)
 #endif  // defined(__HIP_PLATFORM_AMD__)
 }
 
-static int get_cuda_kernel_attribute(void* context, void* kernel, CUfunction_attribute attribute)
+static int get_cuda_kernel_attribute(void* context, void* kernel, int attribute)
 {
     if (!kernel)
         return -1;
@@ -6301,7 +6301,7 @@ static int get_cuda_kernel_attribute(void* context, void* kernel, CUfunction_att
         return -1;
 #else
     int value = 0;
-    if (!check_cu(cuFuncGetAttribute_f(&value, attribute, (CUfunction)kernel)))
+    if (!check_cu(cuFuncGetAttribute_f(&value, (CUfunction_attribute)attribute, (CUfunction)kernel)))
         return -1;
 #endif  // defined(__HIP_PLATFORM_AMD__)
 
@@ -6322,9 +6322,9 @@ bool wp_cuda_get_kernel_properties(void* context, void* kernel, int* properties,
     ContextGuard guard(context);
     int queried_properties[kernel_property_count] = {};
 
-    if (!check_cu(cuFuncGetAttribute_f(&queried_properties[0], CU_FUNC_ATTRIBUTE_NUM_REGS, (CUfunction)kernel)))
-        return false;
-    if (!check_cu(cuFuncGetAttribute_f(&queried_properties[1], CU_FUNC_ATTRIBUTE_LOCAL_SIZE_BYTES, (CUfunction)kernel)))
+    queried_properties[0] = get_cuda_kernel_attribute(context, kernel, CU_FUNC_ATTRIBUTE_NUM_REGS);
+    queried_properties[1] = get_cuda_kernel_attribute(context, kernel, CU_FUNC_ATTRIBUTE_LOCAL_SIZE_BYTES);
+    if (queried_properties[0] < 0 || queried_properties[1] < 0)
         return false;
 
     properties[0] = queried_properties[0];
