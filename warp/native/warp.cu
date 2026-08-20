@@ -209,6 +209,7 @@ struct GraphAllocInfo {
     cudaGraphNode_t node = NULL;  // corresponding mem alloc node in the graph
     bool ref_exists = false;  // whether user reference still exists
     bool graph_destroyed = false;  // whether graph instance was destroyed
+    bool stable = false;  // plain allocation made under a paused capture; free with the plain allocator
 };
 
 // Information used when deferring module unloading.
@@ -558,6 +559,7 @@ static bool capturable_tmp_alloc(void* context, const void* data, size_t size, v
 
     if (capture_info) {
         // ongoing graph capture - need to stage the fill value so that it persists with the graph
+
 #if !defined(__HIP_PLATFORM_AMD__) && CUDA_VERSION >= 12040
         if (wp_cuda_driver_version() >= 12040) {
             // pause the capture so that the alloc/memcpy won't be captured
@@ -1068,6 +1070,60 @@ void* wp_alloc_device_async(void* context, size_t s, void* stream_, const char* 
     else
         stream = get_current_stream(context);
 
+#if defined(__HIP_PLATFORM_AMD__)
+    // Opt-in stable capture allocations: pause the capture, allocate with the
+    // plain allocator, resume. The graph then records no MEM_ALLOC node for
+    // this buffer, so replays touch a stable address instead of re-executing
+    // an allocation ROCm cannot reliably rematerialize (see
+    // KNOWN_ISSUES-AMD.md). The graph owns the buffer until it is destroyed
+    // and the user reference is gone, through the same GraphAllocInfo
+    // handshake pool allocations use.
+    if (wp_hip_stable_capture_allocs_enabled() && wp_cuda_stream_is_capturing(stream)) {
+        // Resolve the owning capture through the stream when it is one Warp
+        // manages; fall back to the id registry (kept current by the re-key
+        // in resume_capture) for forked streams.
+        CaptureInfo* stable_capture = NULL;
+        StreamInfo* stable_stream_info = get_stream_info(stream);
+        if (stable_stream_info && stable_stream_info->capture) {
+            stable_capture = stable_stream_info->capture;
+        } else {
+            auto stable_capture_iter = g_captures.find(get_capture_id(stream));
+            if (stable_capture_iter != g_captures.end())
+                stable_capture = stable_capture_iter->second;
+        }
+        // Only intercept allocations made on the capture's origin stream:
+        // pausing requires EndCapture on the origin, which is invalid while a
+        // forked stream's capture frontier is active, and a failed pause
+        // leaves the stream wedged in capture state. Forked-stream
+        // allocations keep the pooled path (alloc nodes), which multi-stream
+        // captures used before this opt-in existed.
+        if (stable_capture && static_cast<CUstream>(stream) == stable_capture->stream) {
+            // Pause/resume must run on the stream that began the capture;
+            // ending the capture from a forked stream is invalid. The plain
+            // allocation itself is not stream-bound.
+            CUstream origin_stream = stable_capture->stream;
+            void* graph = NULL;
+            if (!wp_cuda_graph_pause_capture(context, origin_stream, &graph))
+                return NULL;
+            void* stable_ptr = wp_alloc_device_default(context, s, tag);
+            if (!wp_cuda_graph_resume_capture(context, origin_stream, graph)) {
+                wp_free_device_default(context, stable_ptr);
+                return NULL;
+            }
+            if (stable_ptr) {
+                GraphAllocInfo alloc_info;
+                alloc_info.capture_id = stable_capture->id;
+                alloc_info.context = context ? context : get_current_context();
+                alloc_info.node = NULL;
+                alloc_info.ref_exists = true;
+                alloc_info.stable = true;
+                g_graph_allocs[stable_ptr] = alloc_info;
+            }
+            return stable_ptr;
+        }
+    }
+#endif  // defined(__HIP_PLATFORM_AMD__)
+
     void* ptr = NULL;
     check_cuda(cudaMallocAsync(&ptr, s, stream));
 
@@ -1185,6 +1241,27 @@ void wp_free_device_async(void* context, void* ptr, void** dbg_node_ret)
     } else {
         // get the graph allocation details
         GraphAllocInfo& alloc_info = alloc_iter->second;
+
+#if defined(__HIP_PLATFORM_AMD__)
+        if (alloc_info.stable) {
+            // A stable allocation has no MEM_ALLOC node; the graph's kernels
+            // read this address on every replay, so the buffer must outlive
+            // the graph whether or not the capture is still active. Free it
+            // only once the graph is gone, with the plain allocator that
+            // created it.
+            if (alloc_info.graph_destroyed) {
+                if (g_captures.empty())
+                    wp_free_device_default(context, ptr);
+                else
+                    deferred_free(ptr, context, false);
+                g_graph_allocs.erase(alloc_iter);
+            } else {
+                alloc_info.ref_exists = false;
+            }
+            return;
+        }
+#endif  // defined(__HIP_PLATFORM_AMD__)
+
         uint64_t capture_id = alloc_info.capture_id;
 
         // Check if the capture is still active on its stream. The second condition guards
@@ -4012,8 +4089,9 @@ bool wp_cuda_graph_end_capture(void* context, void* stream, void** graph_ret)
                 if (!alloc_info.ref_exists) {
                     // The user reference was already dropped (e.g., freed during conditional
                     // body capture). No graph instance will exist to own the allocation, so
-                    // free it once graph captures complete.
-                    deferred_free(it->first, alloc_info.context, true);
+                    // free it once graph captures complete. Stable allocations came from the
+                    // plain allocator and must be freed the matching way.
+                    deferred_free(it->first, alloc_info.context, !alloc_info.stable);
                     it = g_graph_allocs.erase(it);
                     continue;
                 }
@@ -4142,6 +4220,11 @@ static void* wp_hip_graph_instantiate_worker(void* p)
     const unsigned int flags
         = wp_hip_graph_free_nodes_enabled() ? 0u : (unsigned int)cudaGraphInstantiateFlagAutoFreeOnLaunch;
     *a->success_out = check_cuda(cudaGraphInstantiateWithFlags(a->exec_out, a->graph, flags));
+    // WP_DEBUG_GRAPH_DOT: on instantiate failure, dump the graph topology for triage.
+    if (!*a->success_out && getenv("WP_DEBUG_GRAPH_DOT")) {
+        hipGraphDebugDotPrint((hipGraph_t)a->graph, getenv("WP_DEBUG_GRAPH_DOT"), 0);
+        ignore_cuda_error(cudaGetLastError());
+    }
     return nullptr;
 }
 #endif
@@ -4427,6 +4510,77 @@ int wp_cuda_graph_alloc_query(void* alloc_node, void* query_node)
 }
 
 // Support for conditional graph nodes available with CUDA 12.4+.
+// Pause/resume of an in-progress capture uses only core graph APIs
+// (EndCapture / BeginCaptureToGraph), so it is available on HIP and on
+// CUDA toolkits older than 12.4; only the conditional-node machinery
+// below needs the newer toolkit.
+bool wp_cuda_graph_pause_capture(void* context, void* stream, void** graph_ret)
+{
+    ContextGuard guard(context);
+
+    CUstream cuda_stream = static_cast<CUstream>(stream);
+    if (!check_cuda(cudaStreamEndCapture(cuda_stream, (cudaGraph_t*)graph_ret)))
+        return false;
+    return true;
+}
+
+bool wp_cuda_graph_resume_capture(void* context, void* stream, void* graph)
+{
+    ContextGuard guard(context);
+
+    CUstream cuda_stream = static_cast<CUstream>(stream);
+    cudaGraph_t cuda_graph = static_cast<cudaGraph_t>(graph);
+
+    std::vector<cudaGraphNode_t> leaf_nodes;
+    if (!get_graph_leaf_nodes_always(cuda_graph, leaf_nodes))
+        return false;
+
+    // Resume with the same capture mode the user picked at begin time so a
+    // pause/resume cycle (driven by conditional/while graph nodes) does not
+    // silently downgrade Global/Relaxed captures to ThreadLocal. The stream
+    // must already be known to Warp with an active CaptureInfo at this
+    // point because the resume path is only reached after a matching pause
+    // on a Warp-managed capture; if either is missing something is badly
+    // out of sync, fail fast rather than guess a mode.
+    StreamInfo* stream_info = get_stream_info(cuda_stream);
+    if (!stream_info) {
+        wp::set_error_string("Warp error: resume_capture called on unknown stream");
+        return false;
+    }
+    CaptureInfo* capture = stream_info->capture;
+    if (!capture) {
+        wp::set_error_string("Warp error: resume_capture called on stream with no active capture");
+        return false;
+    }
+    cudaStreamCaptureMode resume_mode = capture->mode;
+
+    if (!check_cuda(cudaStreamBeginCaptureToGraph(
+            cuda_stream, cuda_graph, leaf_nodes.data(), nullptr, leaf_nodes.size(), resume_mode
+        )))
+        return false;
+
+#if defined(__HIP_PLATFORM_AMD__)
+    // On ROCm, BeginCaptureToGraph assigns a NEW capture id to the stream
+    // (CUDA keeps the original). Every structure keyed by the id — the
+    // capture registry and per-allocation records — must be re-keyed, or
+    // subsequent lookups silently miss and the capture machinery
+    // desynchronizes mid-capture.
+    uint64_t resumed_id = get_capture_id(cuda_stream);
+    if (resumed_id != capture->id) {
+        uint64_t old_id = capture->id;
+        g_captures.erase(old_id);
+        capture->id = resumed_id;
+        g_captures[resumed_id] = capture;
+        for (auto& alloc_kv : g_graph_allocs) {
+            if (alloc_kv.second.capture_id == old_id)
+                alloc_kv.second.capture_id = resumed_id;
+        }
+    }
+#endif  // defined(__HIP_PLATFORM_AMD__)
+
+    return true;
+}
+
 #if !defined(__HIP_PLATFORM_AMD__) && CUDA_VERSION >= 12040
 
 // CUBIN or PTX data for compiled conditional modules, loaded on demand, keyed on device architecture
@@ -4571,54 +4725,6 @@ static CUfunction get_conditional_kernel(void* context, int arch, bool use_ptx, 
     }
 
     return kernel;
-}
-
-bool wp_cuda_graph_pause_capture(void* context, void* stream, void** graph_ret)
-{
-    ContextGuard guard(context);
-
-    CUstream cuda_stream = static_cast<CUstream>(stream);
-    if (!check_cuda(cudaStreamEndCapture(cuda_stream, (cudaGraph_t*)graph_ret)))
-        return false;
-    return true;
-}
-
-bool wp_cuda_graph_resume_capture(void* context, void* stream, void* graph)
-{
-    ContextGuard guard(context);
-
-    CUstream cuda_stream = static_cast<CUstream>(stream);
-    cudaGraph_t cuda_graph = static_cast<cudaGraph_t>(graph);
-
-    std::vector<cudaGraphNode_t> leaf_nodes;
-    if (!get_graph_leaf_nodes(cuda_graph, leaf_nodes))
-        return false;
-
-    // Resume with the same capture mode the user picked at begin time so a
-    // pause/resume cycle (driven by conditional/while graph nodes) does not
-    // silently downgrade Global/Relaxed captures to ThreadLocal. The stream
-    // must already be known to Warp with an active CaptureInfo at this
-    // point because the resume path is only reached after a matching pause
-    // on a Warp-managed capture; if either is missing something is badly
-    // out of sync, fail fast rather than guess a mode.
-    StreamInfo* stream_info = get_stream_info(cuda_stream);
-    if (!stream_info) {
-        wp::set_error_string("Warp error: resume_capture called on unknown stream");
-        return false;
-    }
-    CaptureInfo* capture = stream_info->capture;
-    if (!capture) {
-        wp::set_error_string("Warp error: resume_capture called on stream with no active capture");
-        return false;
-    }
-    cudaStreamCaptureMode resume_mode = capture->mode;
-
-    if (!check_cuda(cudaStreamBeginCaptureToGraph(
-            cuda_stream, cuda_graph, leaf_nodes.data(), nullptr, leaf_nodes.size(), resume_mode
-        )))
-        return false;
-
-    return true;
 }
 
 // https://developer.nvidia.com/blog/constructing-cuda-graphs-with-dynamic-parameters/#combined_approach
@@ -5011,18 +5117,6 @@ bool wp_cuda_graph_set_condition(void* context, void* stream, int arch, bool use
 
 #else
 // stubs for conditional graph node API if CUDA toolkit is too old.
-
-bool wp_cuda_graph_pause_capture(void* context, void* stream, void** graph_ret)
-{
-    wp::set_error_string("Warp error: Warp must be built with CUDA Toolkit 12.4+ to enable conditional graph nodes");
-    return false;
-}
-
-bool wp_cuda_graph_resume_capture(void* context, void* stream, void* graph)
-{
-    wp::set_error_string("Warp error: Warp must be built with CUDA Toolkit 12.4+ to enable conditional graph nodes");
-    return false;
-}
 
 bool wp_cuda_graph_insert_if_else(
     void* context, void* stream, int arch, bool use_ptx, int* condition, void** if_graph_ret, void** else_graph_ret

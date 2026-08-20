@@ -506,6 +506,25 @@ bool wp_hip_graph_free_nodes_enabled()
 #endif  // defined(__HIP_PLATFORM_AMD__)
 }
 
+bool wp_hip_stable_capture_allocs_enabled()
+{
+#if defined(__HIP_PLATFORM_AMD__)
+    // Opt-in: allocations made during graph capture pause the capture and use
+    // the plain allocator, so the captured graph carries no MEM_ALLOC nodes and
+    // replays touch stable addresses. Off by default until the trade-off
+    // (allocations live for the graph's lifetime) has soaked. See
+    // KNOWN_ISSUES-AMD.md, graph memory-allocation nodes.
+    static int enabled = -1;
+    if (enabled == -1) {
+        const char* e = getenv("WARP_HIP_STABLE_CAPTURE_ALLOCS");
+        enabled = (e && e[0] == '1' && e[1] == '\0') ? 1 : 0;
+    }
+    return enabled == 1;
+#else
+    return false;
+#endif  // defined(__HIP_PLATFORM_AMD__)
+}
+
 bool get_graph_leaf_nodes(cudaGraph_t graph, std::vector<cudaGraphNode_t>& leaf_nodes_ret)
 {
     // Kept inert on HIP unless the free-node machinery is enabled, so every
@@ -514,6 +533,11 @@ bool get_graph_leaf_nodes(cudaGraph_t graph, std::vector<cudaGraphNode_t>& leaf_
         leaf_nodes_ret.clear();
         return false;
     }
+    return get_graph_leaf_nodes_always(graph, leaf_nodes_ret);
+}
+
+bool get_graph_leaf_nodes_always(cudaGraph_t graph, std::vector<cudaGraphNode_t>& leaf_nodes_ret)
+{
 
     if (!graph)
         return false;

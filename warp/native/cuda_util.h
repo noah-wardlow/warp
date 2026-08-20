@@ -243,6 +243,11 @@ bool get_capture_dependencies(CUstream stream, std::vector<CUgraphNode>& depende
 // Opt-in on HIP (WARP_HIP_GRAPH_FREE_NODES=1): enables graph memory-free
 // nodes and the leaf-node queries they depend on. Always true off HIP.
 bool wp_hip_graph_free_nodes_enabled();
+bool wp_hip_stable_capture_allocs_enabled();
+// Ungated variant for pause/resume, which must work regardless of the
+// free-node opt-in; the gated get_graph_leaf_nodes below keeps every
+// free-node consumer reverting together.
+bool get_graph_leaf_nodes_always(cudaGraph_t graph, std::vector<cudaGraphNode_t>& leaf_nodes_ret);
 
 bool get_graph_leaf_nodes(cudaGraph_t graph, std::vector<cudaGraphNode_t>& leaf_nodes_ret);
 bool get_dependent_leaf_nodes(cudaGraphNode_t ancestor, std::vector<cudaGraphNode_t>& leaf_nodes_ret);
