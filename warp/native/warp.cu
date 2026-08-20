@@ -6586,6 +6586,13 @@ size_t wp_cuda_launch_kernel(
     }
 
     check_cu(res);
+#if defined(__HIP_PLATFORM_AMD__)
+    // A failed launch leaves HIP's per-thread error set, and the next
+    // unrelated runtime call returns it (a strided copy was the observed
+    // victim). CUDA does not leak the launch error this way; consume it.
+    if (res != CUDA_SUCCESS)
+        ignore_cuda_error(cudaGetLastError());
+#endif  // defined(__HIP_PLATFORM_AMD__)
 
     end_cuda_range(WP_TIMING_KERNEL, stream);
 
