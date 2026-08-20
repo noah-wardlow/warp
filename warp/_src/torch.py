@@ -191,7 +191,7 @@ def from_torch(
     dtype: type | None = None,
     requires_grad: bool | None = None,
     grad=None,
-    sync: bool = True,
+    sync: bool | None = None,
     return_ctype: bool = False,
     retain_grad: bool = False,
 ) -> warp.array | warp._src.types.array_t:
@@ -224,6 +224,8 @@ def from_torch(
     """
     # On HIP/AMD, PyTorch and Warp may use different streams, and stream synchronization
     # semantics differ from CUDA. Sync PyTorch's stream to ensure tensor data is ready.
+    if sync is None:
+        sync = t.is_cuda and warp.device_from_torch(t.device).is_hip
     if sync and t.is_cuda:
         import torch  # noqa: PLC0415
         torch.cuda.current_stream(t.device).synchronize()
