@@ -4510,10 +4510,10 @@ int wp_cuda_graph_alloc_query(void* alloc_node, void* query_node)
 }
 
 // Support for conditional graph nodes available with CUDA 12.4+.
-// Pause/resume of an in-progress capture uses only core graph APIs
-// (EndCapture / BeginCaptureToGraph), so it is available on HIP and on
-// CUDA toolkits older than 12.4; only the conditional-node machinery
-// below needs the newer toolkit.
+// Pause/resume of an in-progress capture needs BeginCaptureToGraph
+// (CUDA 12.3+, always present on HIP); it does not need the
+// conditional-node machinery below, which requires 12.4.
+#if defined(__HIP_PLATFORM_AMD__) || CUDA_VERSION >= 12030
 bool wp_cuda_graph_pause_capture(void* context, void* stream, void** graph_ret)
 {
     ContextGuard guard(context);
@@ -4580,6 +4580,22 @@ bool wp_cuda_graph_resume_capture(void* context, void* stream, void* graph)
 
     return true;
 }
+
+#else
+// Stubs when the CUDA toolkit predates BeginCaptureToGraph.
+
+bool wp_cuda_graph_pause_capture(void* context, void* stream, void** graph_ret)
+{
+    wp::set_error_string("Warp error: Warp must be built with CUDA Toolkit 12.3+ to pause graph capture");
+    return false;
+}
+
+bool wp_cuda_graph_resume_capture(void* context, void* stream, void* graph)
+{
+    wp::set_error_string("Warp error: Warp must be built with CUDA Toolkit 12.3+ to resume graph capture");
+    return false;
+}
+#endif  // defined(__HIP_PLATFORM_AMD__) || CUDA_VERSION >= 12030
 
 #if !defined(__HIP_PLATFORM_AMD__) && CUDA_VERSION >= 12040
 
