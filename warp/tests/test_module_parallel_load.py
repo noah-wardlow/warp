@@ -226,6 +226,8 @@ class TestModuleParallelLoad(unittest.TestCase):
     @unittest.skipUnless(wp.is_cuda_available(), "Requires CUDA")
     def test_force_load_restores_cuda_context_on_failure(self):
         """Verify that a module-load failure restores the calling thread's CUDA context."""
+        if wp.get_device("cuda:0").is_hip:
+            self.skipTest("HIP's context API cannot represent 'no current context'; the postcondition is unachievable")
         module_name = "warp.tests.aux_test_unresolved_func"
         unresolved_func_module = importlib.import_module(module_name)
         failed_module = wp.get_module(unresolved_func_module.__name__)
