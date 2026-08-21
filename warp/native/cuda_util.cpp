@@ -509,15 +509,24 @@ bool wp_hip_graph_free_nodes_enabled()
 bool wp_hip_stable_capture_allocs_enabled()
 {
 #if defined(__HIP_PLATFORM_AMD__)
-    // Opt-in: allocations made during graph capture pause the capture and use
-    // the plain allocator, so the captured graph carries no MEM_ALLOC nodes and
-    // replays touch stable addresses. Off by default until the trade-off
-    // (allocations live for the graph's lifetime) has soaked. See
-    // KNOWN_ISSUES-AMD.md, graph memory-allocation nodes.
+    // Allocations made during graph capture pause the capture and use the plain
+    // allocator, so the captured graph carries no MEM_ALLOC nodes and replays
+    // touch stable addresses.
+    //
+    // On by default: HIP capture-time async allocations become graph MEM_ALLOC
+    // nodes that ROCm does not rematerialize correctly on replay. On a
+    // non-primary device (cuda:1+) this is a deterministic replay fault -- e.g.
+    // capturing a padded bsr_set_transpose (CUB sort scratch allocated during
+    // capture) and relaunching it faults with an illegal memory access, while
+    // the same capture on cuda:0 succeeds. Routing capture-time allocations
+    // through the plain allocator avoids the alloc nodes entirely and makes
+    // multi-GPU captures relaunchable. The trade-off is that such buffers live
+    // for the graph's lifetime. Opt out with WARP_HIP_STABLE_CAPTURE_ALLOCS=0.
+    // See KNOWN_ISSUES-AMD.md, graph memory-allocation nodes.
     static int enabled = -1;
     if (enabled == -1) {
         const char* e = getenv("WARP_HIP_STABLE_CAPTURE_ALLOCS");
-        enabled = (e && e[0] == '1' && e[1] == '\0') ? 1 : 0;
+        enabled = (e && e[0] == '0' && e[1] == '\0') ? 0 : 1;
     }
     return enabled == 1;
 #else

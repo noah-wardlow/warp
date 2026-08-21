@@ -934,6 +934,15 @@ static std::map<std::pair<void*, size_t>, std::vector<void*>> g_descriptor_pool;
 
 void* wp_descriptor_alloc(void* context, size_t s, const char* tag)
 {
+    // WP_CURRENT_CONTEXT is NULL, meaning "the current context". Resolve it to
+    // the real context handle before using it as the pool key. Otherwise every
+    // device shares the single { NULL, s } bucket, so a descriptor freed on one
+    // device is handed back to an object being built on another: its kernels
+    // then dereference a foreign-device address and fault (e.g. building a Mesh
+    // on cuda:1 after destroying one on cuda:0).
+    if (context == NULL)
+        context = get_current_context();
+
     {
         std::lock_guard<std::mutex> lock(g_descriptor_pool_mutex);
         auto it = g_descriptor_pool.find({ context, s });
@@ -950,6 +959,10 @@ void wp_descriptor_free(void* context, void* ptr, size_t s)
 {
     if (!ptr)
         return;
+    // Match wp_descriptor_alloc: key the pool by the real context so a freed
+    // descriptor is only recycled for objects on the same device.
+    if (context == NULL)
+        context = get_current_context();
     std::lock_guard<std::mutex> lock(g_descriptor_pool_mutex);
     g_descriptor_pool[{ context, s }].push_back(ptr);
 }
