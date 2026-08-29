@@ -32,6 +32,10 @@ Follow-up on the gfx1151 feature branch:
   selection instead. The newly enabled gfx1151 coverage passes 223 core
   low-precision/atomic tests plus 8 bfloat16 DLPack, PyTorch, and tile-matmul
   tests on ROCm 7.2.
+- Native mipmapped arrays remain unavailable, but this no longer hides arrays
+  of texture handles: `Device.supports_texture_mipmaps` selects one base level
+  on HIP while retaining explicit-LOD sampling. The full texture module now
+  passes **129 tests with 6 mipmap capability skips** on ROCm 7.2.
 
 Validation at the preceding AMD integration baseline:
 

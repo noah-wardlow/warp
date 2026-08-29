@@ -953,12 +953,8 @@ def _skip_without_mipmap_support(test, device):
     """Mipmapped textures require mipmapped-array creation, which is unsupported on some
     backends: on gfx1151/ROCm 7.2 ``hipMipmappedArrayCreate`` returns "operation not
     supported" (error 801). Skip mipmap tests there rather than reporting an error."""
-    try:
-        wp.Texture2D(np.zeros((4, 4), dtype=np.float32), num_mip_levels=2, device=device)
-    except RuntimeError as e:
-        if "not supported" in str(e).lower():
-            test.skipTest("mipmapped textures are not supported on this device")
-        raise
+    if not device.supports_texture_mipmaps:
+        test.skipTest("mipmapped textures are not supported on this device")
 
 
 def test_texture2d_mipmapped_cuda_array_current_limitation(test, device):
@@ -2634,6 +2630,7 @@ def test_texture2d_array(test, device):
     """
     num_textures = 4
     width, height = 4, 4
+    num_mip_levels = 2 if device.supports_texture_mipmaps else 1
 
     # Create textures with different constant values (0.25, 0.5, 0.75, 1.0)
     textures = []
@@ -2645,7 +2642,7 @@ def test_texture2d_array(test, device):
             data,
             filter_mode=wp.TextureFilterMode.CLOSEST,
             address_mode=wp.TextureAddressMode.CLAMP,
-            num_mip_levels=2,
+            num_mip_levels=num_mip_levels,
             device=device,
         )
         textures.append(tex)
@@ -2682,6 +2679,7 @@ def test_texture3d_array(test, device):
     """
     num_textures = 4
     width, height, depth = 4, 4, 4
+    num_mip_levels = 2 if device.supports_texture_mipmaps else 1
 
     # Create textures with different constant values (0.1, 0.2, 0.3, 0.4)
     textures = []
@@ -2693,7 +2691,7 @@ def test_texture3d_array(test, device):
             data,
             filter_mode=wp.TextureFilterMode.CLOSEST,
             address_mode=wp.TextureAddressMode.CLAMP,
-            num_mip_levels=2,
+            num_mip_levels=num_mip_levels,
             device=device,
         )
         textures.append(tex)

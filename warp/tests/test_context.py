@@ -23,6 +23,7 @@ class TestContext(unittest.TestCase):
             self.assertIsInstance(device.supports_graph_event_timing, bool)
             self.assertIsInstance(device.supports_float16, bool)
             self.assertIsInstance(device.supports_bfloat16, bool)
+            self.assertIsInstance(device.supports_texture_mipmaps, bool)
 
     def test_kernel_mangled_name_cache(self):
         """Verify that mangled kernel names are cached and invalidated when their inputs change."""
