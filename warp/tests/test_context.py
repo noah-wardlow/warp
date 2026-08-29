@@ -20,6 +20,7 @@ class TestContext(unittest.TestCase):
         for device in wp.get_devices():
             self.assertIsInstance(device.supports_graph_capture, bool)
             self.assertIsInstance(device.supports_cubql, bool)
+            self.assertIsInstance(device.supports_graph_event_timing, bool)
 
     def test_kernel_mangled_name_cache(self):
         """Verify that mangled kernel names are cached and invalidated when their inputs change."""

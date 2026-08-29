@@ -4990,6 +4990,7 @@ class Event:
 
         self.device = device
         self.enable_timing = enable_timing
+        self._hip_external_record_stream: Stream | None = None
 
         if cuda_event is not None:
             self.cuda_event = cuda_event
@@ -5172,7 +5173,21 @@ class Stream:
                 f"Event from device {event.device} cannot be recorded on stream from device {self.device}"
             )
 
+        capture_graph = None
+        if runtime.is_hip and runtime.captures and self.is_capturing:
+            capture_id = runtime.core.wp_cuda_stream_get_capture_id(self.cuda_stream)
+            capture_graph = runtime.captures.get(capture_id)
+
+        if event.enable_timing and capture_graph is not None:
+            raise RuntimeError("Timing events inside graph captures are not supported on HIP/ROCm")
+
         runtime.core.wp_cuda_event_record(event.cuda_event, self.cuda_stream, external or event.enable_timing)
+
+        if runtime.is_hip and external:
+            if capture_graph is not None:
+                capture_graph._hip_external_record_events.add(event)
+            else:
+                event._hip_external_record_stream = self
 
         return event
 
@@ -5187,6 +5202,12 @@ class Stream:
                 argument has no effect outside of graph capture.
         """
         runtime.core.wp_cuda_stream_wait_event(self.cuda_stream, event.cuda_event, external)
+
+        if runtime.is_hip and external and runtime.captures and self.is_capturing:
+            capture_id = runtime.core.wp_cuda_stream_get_capture_id(self.cuda_stream)
+            capture_graph = runtime.captures.get(capture_id)
+            if capture_graph is not None:
+                capture_graph._hip_external_wait_events.add(event)
 
     def wait_stream(self, other_stream: Stream, event: Event | None = None, external: bool = False):
         """Record an event on ``other_stream`` and make this stream wait on it.
@@ -5285,6 +5306,7 @@ class Device:
         supports_graph_capture (bool): Indicates whether native graph capture is supported on the device.
             CPU devices use APIC recording; CUDA and HIP devices use their native graph runtimes.
         supports_cubql (bool): Indicates whether the cuBQL BVH backend is available in this Warp build.
+        supports_graph_event_timing (bool): Indicates whether timing events can be recorded inside native graph captures.
         is_ipc_supported (Optional[bool]): Indicates whether the device supports IPC.
 
             - ``True`` if supported.
@@ -5541,6 +5563,11 @@ class Device:
     def supports_cubql(self) -> bool:
         """A boolean indicating whether the cuBQL BVH backend is available."""
         return is_cubql_available()
+
+    @property
+    def supports_graph_event_timing(self) -> bool:
+        """Indicates whether timing events can be recorded inside native graph captures."""
+        return self.is_cuda and not self.is_hip
 
     @property
     def context(self):
@@ -5912,6 +5939,8 @@ class Graph:
         self._deterministic_buffer_refs: list[Any] = []
         self.graph_exec: ctypes.c_void_p | None = None
         self.graph: ctypes.c_void_p | None = None
+        self._hip_external_record_events: set[Event] = set()
+        self._hip_external_wait_events: set[Event] = set()
 
         # APIC recording state
         self.apic: bool = False  # Whether APIC serialization is allowed
@@ -13480,8 +13509,26 @@ def capture_launch(graph: Graph, stream: Stream | None = None):
             raise RuntimeError(f"Graph creation error: {runtime.get_error_string()}")
         graph.graph_exec = g
 
+    if runtime.is_hip and graph._hip_external_wait_events:
+        # ROCm does not make a replayed external event record pending at graph
+        # launch. Waiting on that event from another graph can therefore race
+        # and observe an earlier replay. Preserve the dependency by waiting on
+        # the stream used for the producer graph's most recent launch.
+        for event in graph._hip_external_wait_events:
+            if (
+                event._hip_external_record_stream is not None
+                and event._hip_external_record_stream.cuda_stream != stream.cuda_stream
+            ):
+                synchronize_stream(event._hip_external_record_stream)
+            elif event._hip_external_record_stream is None:
+                synchronize_device(graph.device)
+
     if not runtime.core.wp_cuda_graph_launch(graph.graph_exec, stream.cuda_stream):
         raise RuntimeError(f"Graph launch error: {runtime.get_error_string()}")
+
+    if runtime.is_hip:
+        for event in graph._hip_external_record_events:
+            event._hip_external_record_stream = stream
 
 
 def capture_save(graph: Graph, path: str, inputs: dict | None = None, outputs: dict | None = None):

@@ -15,7 +15,19 @@ The port now applies to upstream main at Warp 1.17.0.dev4. The sections below
 were written against the 1.15.0 and 1.12.1 bases and are retained as recorded;
 resolution notes are added in place where the current base changes a verdict.
 
-Validation at this base:
+Follow-up on the gfx1151 feature branch:
+
+- The full stream/event module now passes **22 tests with 3 capability skips**
+  on ROCm 7.2. Replayed external-event dependencies use a conservative
+  producer-stream synchronization on HIP, replacing the broken device-side
+  event wait while retaining asynchronous execution for graphs that do not use
+  external events.
+- Timing events inside replayed graphs remain unsupported by ROCm. Warp now
+  reports this through `Device.supports_graph_event_timing` and raises a clear
+  error at capture time; the corresponding backend test is skipped. Timing
+  events outside graph capture continue to work.
+
+Validation at the preceding AMD integration baseline:
 
 - **Warp unit suite, gfx1151 / ROCm 7.14**: full `warp.tests` suite
   **8313 ok / 226 skip / 6 fail** (~8547 tests). The six failures, each in a

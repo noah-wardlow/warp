@@ -331,6 +331,9 @@ def test_event_elapsed_time(test, device):
 
 
 def test_event_elapsed_time_graph(test, device):
+    if not device.supports_graph_event_timing:
+        test.skipTest("Timing events inside graph captures are not supported on HIP/ROCm")
+
     stream = wp.get_stream(device)
     e1 = wp.Event(device, enable_timing=True)
     e2 = wp.Event(device, enable_timing=True)
