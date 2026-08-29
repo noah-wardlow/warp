@@ -16,6 +16,11 @@ class TestContext(unittest.TestCase):
         self.assertEqual(wp._src.context.type_str(tuple[int, float]), "tuple[int, float]")
         self.assertEqual(wp._src.context.type_str(tuple[int, ...]), "tuple[int, ...]")
 
+    def test_device_backend_capabilities(self):
+        for device in wp.get_devices():
+            self.assertIsInstance(device.supports_graph_capture, bool)
+            self.assertIsInstance(device.supports_cubql, bool)
+
     def test_kernel_mangled_name_cache(self):
         """Verify that mangled kernel names are cached and invalidated when their inputs change."""
 

@@ -4755,9 +4755,6 @@ class CudaUmaHybridAllocator:
         self.device = device
         self._managed_ptrs = set()
         self._pool_alloc = CudaMempoolAllocator(device)
-        # Load HIP for managed allocation
-        import ctypes
-
         try:
             self._hip = ctypes.CDLL("/opt/rocm/lib/libamdhip64.so")
         except OSError:
@@ -5285,6 +5282,9 @@ class Device:
             generate CUDA binary files (cubin) for this device's architecture. ``False`` for CPU devices.
         is_mempool_supported (bool): Indicates whether the device supports using the ``cuMemAllocAsync`` and
             ``cuMemPool`` family of APIs for stream-ordered memory allocations. ``False`` for CPU devices.
+        supports_graph_capture (bool): Indicates whether native graph capture is supported on the device.
+            CPU devices use APIC recording; CUDA and HIP devices use their native graph runtimes.
+        supports_cubql (bool): Indicates whether the cuBQL BVH backend is available in this Warp build.
         is_ipc_supported (Optional[bool]): Indicates whether the device supports IPC.
 
             - ``True`` if supported.
@@ -5525,6 +5525,22 @@ class Device:
         # capture (e.g. a deferred one, which also sets the global runtime._apic_capture) does
         # not make the CPU device report as capturing.
         return _get_apic_capture_for_device(self) is not None
+
+    @property
+    def supports_graph_capture(self) -> bool:
+        """A boolean indicating whether native graph capture is supported on this device.
+
+        CPU devices record APIC operation streams. CUDA and HIP/ROCm devices use
+        their native graph capture and replay implementations. Conditional graph
+        nodes are a separate capability reported by
+        :func:`is_conditional_graph_supported` and remain unsupported on HIP.
+        """
+        return self.is_cpu or self.is_cuda
+
+    @property
+    def supports_cubql(self) -> bool:
+        """A boolean indicating whether the cuBQL BVH backend is available."""
+        return is_cubql_available()
 
     @property
     def context(self):
