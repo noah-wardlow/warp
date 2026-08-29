@@ -36,7 +36,7 @@ def _bfloat16_numpy_to_float32(values):
 # runs on gfx1151. Scope the deterministic GPU tests to non-HIP CUDA devices
 # until that is resolved (tracked in KNOWN_ISSUES-AMD.md).
 cuda_devices = [device for device in get_selected_cuda_test_devices() if not device.is_hip]
-bfloat16_cuda_devices = [device for device in cuda_devices if device.arch >= 80]
+bfloat16_cuda_devices = [device for device in cuda_devices if device.supports_bfloat16]
 all_devices = [device for device in get_test_devices() if not device.is_hip]
 cpu_device = wp.get_device("cpu")
 REPEAT_COUNT = 3

@@ -5307,6 +5307,8 @@ class Device:
             CPU devices use APIC recording; CUDA and HIP devices use their native graph runtimes.
         supports_cubql (bool): Indicates whether the cuBQL BVH backend is available in this Warp build.
         supports_graph_event_timing (bool): Indicates whether timing events can be recorded inside native graph captures.
+        supports_float16 (bool): Indicates whether float16 kernels are supported on this device.
+        supports_bfloat16 (bool): Indicates whether bfloat16 kernels are supported on this device.
         is_ipc_supported (Optional[bool]): Indicates whether the device supports IPC.
 
             - ``True`` if supported.
@@ -5568,6 +5570,16 @@ class Device:
     def supports_graph_event_timing(self) -> bool:
         """Indicates whether timing events can be recorded inside native graph captures."""
         return self.is_cuda and not self.is_hip
+
+    @property
+    def supports_float16(self) -> bool:
+        """Indicates whether float16 kernels are supported on this device."""
+        return self.is_cpu or self.is_hip or self.arch >= 70
+
+    @property
+    def supports_bfloat16(self) -> bool:
+        """Indicates whether bfloat16 kernels are supported on this device."""
+        return self.is_cpu or self.is_hip or self.arch >= 80
 
     @property
     def context(self):

@@ -727,8 +727,7 @@ add_function_test(
 add_function_test(TestDLPack, "test_dlpack_dtypes_and_shapes", test_dlpack_dtypes_and_shapes, devices=devices)
 add_function_test(TestDLPack, "test_dlpack_stream_arg", test_dlpack_stream_arg, devices=devices)
 
-# bfloat16 tests require arch >= 80
-bf16_devices = [d for d in devices if d.is_cpu or (d.is_cuda and d.arch >= 80)]
+bf16_devices = [d for d in devices if d.supports_bfloat16]
 if bf16_devices:
     add_function_test(TestDLPack, "test_dlpack_bf16_round_trip", test_dlpack_bf16_round_trip, devices=bf16_devices)
 

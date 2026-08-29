@@ -420,12 +420,11 @@ class TestTileMatmul(unittest.TestCase):
 
 devices = get_test_devices()
 
-# bfloat16 requires CC >= 8.0 (Ampere+)
 bf16_devices = []
 if wp.is_cpu_available():
     bf16_devices.append("cpu")
 for cuda_device in get_selected_cuda_test_devices():
-    if cuda_device.arch >= 80:
+    if cuda_device.supports_bfloat16:
         bf16_devices.append(cuda_device)
 
 add_function_test(TestTileMatmul, "test_tile_gemm_fp16", test_tile_gemm(wp.float16), devices=devices)

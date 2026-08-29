@@ -1505,10 +1505,7 @@ else:
 
     add_function_test(TestTorch, "test_torch_to_warp_types", test_torch_to_warp_types)
 
-    # bfloat16 tests require arch >= 80
-    bf16_torch_devices = [
-        device for device in torch_candidate_devices if device.is_cpu or (device.is_cuda and device.arch >= 80)
-    ]
+    bf16_torch_devices = [device for device in torch_candidate_devices if device.supports_bfloat16]
     if bf16_torch_devices:
         add_function_test(
             TestTorch,

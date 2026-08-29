@@ -26,6 +26,12 @@ Follow-up on the gfx1151 feature branch:
   reports this through `Device.supports_graph_event_timing` and raises a clear
   error at capture time; the corresponding backend test is skipped. Timing
   events outside graph capture continue to work.
+- CUDA compute-capability gates (`arch >= 70/80`) previously hid float16 and
+  bfloat16 coverage on every `gfx*` target because HIP devices correctly report
+  no CUDA SM version. Device-level low-precision capability queries now drive
+  selection instead. The newly enabled gfx1151 coverage passes 223 core
+  low-precision/atomic tests plus 8 bfloat16 DLPack, PyTorch, and tile-matmul
+  tests on ROCm 7.2.
 
 Validation at the preceding AMD integration baseline:
 

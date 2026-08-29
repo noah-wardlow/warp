@@ -111,7 +111,7 @@ devices = []
 if wp.is_cpu_available():
     devices.append("cpu")
 for cuda_device in get_selected_cuda_test_devices():
-    if cuda_device.arch >= 70:
+    if cuda_device.supports_float16:
         devices.append(cuda_device)
 
 add_function_test(TestFp16, "test_fp16_conversion", test_fp16_conversion, devices=devices)

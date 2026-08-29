@@ -750,8 +750,8 @@ def test_atomic_half_deterministic(test, device):
 
 def test_atomic_bfloat16_deterministic(test, device):
     """Verify deterministic mode with bfloat16 atomics."""
-    if device.arch < 80:
-        test.skipTest("bfloat16 atomics require CUDA architecture >= 80")
+    if not device.supports_bfloat16:
+        test.skipTest("bfloat16 atomics are not supported on this device")
 
     n = 64
     out_size = 8

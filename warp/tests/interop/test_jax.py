@@ -3301,10 +3301,7 @@ else:
                     device_check=_check_jax_device,
                 )
 
-    # bfloat16 tests require arch >= 80
-    bf16_jax_devices = [
-        device for device in jax_candidate_devices if device.is_cpu or (device.is_cuda and device.arch >= 80)
-    ]
+    bf16_jax_devices = [device for device in jax_candidate_devices if device.supports_bfloat16]
     if bf16_jax_devices:
         add_function_test(
             TestJax,

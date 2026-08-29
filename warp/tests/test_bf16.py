@@ -848,7 +848,7 @@ def test_bf16_classification(test, device):
     np.testing.assert_array_equal(out_isnan.numpy(), [False, False, False, True])
 
 
-cuda_bf16_devices = [d for d in get_selected_cuda_test_devices() if d.arch >= 80]
+cuda_bf16_devices = [d for d in get_selected_cuda_test_devices() if d.supports_bfloat16]
 devices = [wp.get_device("cpu"), *cuda_bf16_devices]
 add_function_test(TestBf16, "test_bf16_conversion", test_bf16_conversion, devices=devices)
 add_function_test(TestBf16, "test_bf16_kernel_parameter", test_bf16_kernel_parameter, devices=devices)

@@ -355,8 +355,7 @@ for dtype in (
     wp.vec3d,
 ):
     scalar_type = getattr(dtype, "_wp_scalar_type_", dtype)
-    # bfloat16 requires arch >= 80
-    dtype_devices = [d for d in devices if not d.is_cuda or d.arch >= 80] if scalar_type is wp.bfloat16 else devices
+    dtype_devices = [d for d in devices if d.supports_bfloat16] if scalar_type is wp.bfloat16 else devices
 
     add_function_test(
         TestAtomic,
