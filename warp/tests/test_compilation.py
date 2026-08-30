@@ -126,6 +126,48 @@ class TestCompilation(unittest.TestCase):
 
         self.assertEqual(captured["include_dirs"], [str(include_dir.resolve())])
 
+    def test_hip_build_combines_required_and_extra_include_dirs(self):
+        original_runtime = _build_module.warp._src.context.runtime
+        original_hip_include_dirs = _build_module._get_hip_include_dirs
+        captured = {}
+
+        def compile_hip(*args):
+            num_include_dirs = args[5]
+            include_dirs = args[6]
+            captured["include_dirs"] = [include_dirs[i].decode("utf-8") for i in range(num_include_dirs)]
+            return 0
+
+        try:
+            _build_module.warp._src.context.runtime = SimpleNamespace(
+                core=SimpleNamespace(wp_cuda_compile_program=compile_hip)
+            )
+            with tempfile.TemporaryDirectory() as tmpdir:
+                include_dir = Path(tmpdir) / "include"
+                hip_include_dir = Path(tmpdir) / "hip-include"
+                include_dir.mkdir()
+                hip_include_dir.mkdir()
+                cu_path = Path(tmpdir) / "kernel.cu"
+                output_path = Path(tmpdir) / "kernel.hsaco"
+                cu_path.write_text("// empty test kernel\n")
+                _build_module._get_hip_include_dirs = lambda: [str(hip_include_dir)]
+
+                _build_module.build_cuda(
+                    str(cu_path),
+                    0,
+                    str(output_path),
+                    pch_dir=None,
+                    arch_suffix="gfx1151",
+                    extra_include_dirs=[include_dir, hip_include_dir],
+                )
+        finally:
+            _build_module.warp._src.context.runtime = original_runtime
+            _build_module._get_hip_include_dirs = original_hip_include_dirs
+
+        self.assertEqual(
+            captured["include_dirs"],
+            [str(include_dir.resolve()), str(hip_include_dir.resolve())],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
