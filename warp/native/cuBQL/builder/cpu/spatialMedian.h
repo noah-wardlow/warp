@@ -26,7 +26,7 @@ namespace cuBQL {
     // ******************************************************************
     // IMPLEMENTATION
     // ******************************************************************
-    
+
 #if CUBQL_CPU_BUILDER_IMPLEMENTATION
     namespace spatialMedian_impl {
       struct Topo {
@@ -43,7 +43,7 @@ namespace cuBQL {
         node.admin.count = end-begin;
         node.admin.offset = begin;
       }
-      
+
       inline int makeInner(int nodeID,
                     std::vector<Topo> &topo)
       {
@@ -55,7 +55,7 @@ namespace cuBQL {
         node.admin.offset = childID;
         return childID;
       }
-      
+
       template<typename T, int D>
       void buildRec(int nodeID, int begin, int end,
                     std::vector<Topo> &topo,
@@ -66,13 +66,13 @@ namespace cuBQL {
       {
         if (end-begin <= buildConfig.makeLeafThreshold)
           return makeLeaf(nodeID,begin,end,topo);
-        
+
         using box_t = ::cuBQL::box_t<T,D>;
-        
+
         box_t centBounds;
         for (int i=begin;i<end;i++)
           centBounds.extend(boxes[primIDs[i]].center());
-        
+
         int dim = arg_max(centBounds.size());
         T   pos = centBounds.center()[dim];
         int Nl = 0, Nr = 0;
@@ -85,21 +85,21 @@ namespace cuBQL {
           }
         }
         int mid = -1;
-        if (Nl && Nr) 
+        if (Nl && Nr)
           mid = begin+Nl;
         else if (end - begin <= std::max(1,buildConfig.makeLeafThreshold)/*maxAllowedLeafSize*/)
           return makeLeaf(nodeID,begin,end,topo);
         else
           mid = (begin+end)/2;
-        
+
         for (int i=begin;i<end;i++)
           primIDs[i] = altPrimIDs[i];
-        
+
         int childID = makeInner(nodeID,topo);
         buildRec(childID+0,begin,mid,topo,primIDs,altPrimIDs,boxes,buildConfig);
         buildRec(childID+1,mid,  end,topo,primIDs,altPrimIDs,boxes,buildConfig);
       }
-      
+
       template<typename T, int D>
       void refit(uint64_t nodeID,
                  BinaryBVH<T,D>   &bvh,
@@ -118,7 +118,7 @@ namespace cuBQL {
             node.bounds.extend(boxes[bvh.primIDs[node.admin.offset+i]]);
         }
       }
-                         
+
       template<typename T, int D>
       void spatialMedian(BinaryBVH<T,D>   &bvh,
                          const box_t<T,D> *boxes,
@@ -132,9 +132,24 @@ namespace cuBQL {
           if (box.empty()) continue;
           primIDs.push_back(i);
         }
+
+        if (primIDs.empty()) {
+          // if we had no valid input prims whatsoever
+          bvh.nodes = new typename BinaryBVH<T,D>::Node[1];
+          bvh.nodes[0].bounds = box3f();
+          bvh.nodes[0].admin.offset = 0;
+          bvh.nodes[0].admin.count = 1;
+          bvh.primIDs = new uint32_t[numPrims];
+          for (int i=0;i<numPrims;i++)
+            bvh.primIDs[i] = i;
+          bvh.numPrims = numPrims;
+          bvh.numNodes = 1;
+          return;
+        }
+
         std::vector<int>  altPrimIDs(primIDs.size());
         std::vector<Topo> topo(1);
-        
+
         buildRec(0,0,(int)primIDs.size(),
                  topo,primIDs,altPrimIDs,boxes,buildConfig);
         altPrimIDs.clear();
@@ -153,7 +168,7 @@ namespace cuBQL {
         refit(0,bvh,boxes);
       }
     } // spatialMedian_impl
-    
+
     /*! a simple (and currently non parallel) recursive spatial median
       builder */
     template<typename T, int D>
@@ -165,14 +180,14 @@ namespace cuBQL {
       spatialMedian_impl::spatialMedian(bvh,boxes,numPrims,buildConfig);
     }
 
-    
+
     template<typename T, int D, int W>
     void spatialMedian(WideBVH<T,D,W>   &bvh,
                        const box_t<T,D> *boxes,
                        uint32_t              numPrims,
                        BuildConfig           buildConfig)
     { throw std::runtime_error("not yet implemented"); }
-    
+
 #endif
   }
 }
@@ -197,5 +212,4 @@ namespace cuBQL {
                                   BuildConfig       buildConfig);   \
     }                                                               \
   }                                                                 \
-
 

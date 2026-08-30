@@ -36,6 +36,12 @@ Follow-up on the gfx1151 feature branch:
   of texture handles: `Device.supports_texture_mipmaps` selects one base level
   on HIP while retaining explicit-LOD sampling. The full texture module now
   passes **129 tests with 6 mipmap capability skips** on ROCm 7.2.
+- AMD's established cuBQL HIP port is integrated with the current native BVH
+  layout instead of disabling cuBQL on ROCm. GPU construction, queries, refit,
+  rebuild, meshes, and MJWarp rendering pass 92 Warp geometry tests, 20 fresh
+  three-test regression processes, and 54 MJWarp render/BVH tests. On gfx1151,
+  a one-million-AABB high-quality build takes **0.20--0.22 s with cuBQL** versus
+  **0.47--0.49 s with CPU SAH**.
 
 Validation at the preceding AMD integration baseline:
 

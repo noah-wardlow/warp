@@ -17,7 +17,7 @@ namespace cuBQL {
       // using Scalar = typename T::scalar_t;
       // using vector_t = T;
       using scalar_t = typename T::scalar_t;
-    
+
       /*! default matrix constructor */
       inline LinearSpace2           ( ) = default;
       inline __cubql_both LinearSpace2           ( const LinearSpace2& other ) { vx = other.vx; vy = other.vy; }
@@ -30,7 +30,7 @@ namespace cuBQL {
       : vx(vx), vy(vy) {}
 
       /*! matrix construction from row mayor data */
-      inline __cubql_both LinearSpace2(const scalar_t& m00, const scalar_t& m01, 
+      inline __cubql_both LinearSpace2(const scalar_t& m00, const scalar_t& m01,
                                    const scalar_t& m10, const scalar_t& m11)
       : vx(m00,m10), vy(m01,m11) {}
 
@@ -135,7 +135,7 @@ namespace cuBQL {
   template<typename T> inline __cubql_both
   bool operator ==( const LinearSpace2<T>& a, const LinearSpace2<T>& b )
   { return a.vx == b.vx && a.vy == b.vy; }
-  
+
   template<typename T> inline __cubql_both
   bool operator !=( const LinearSpace2<T>& a, const LinearSpace2<T>& b )
   { return a.vx != b.vx || a.vy != b.vy; }
@@ -152,7 +152,7 @@ namespace cuBQL {
   /// 3D Linear Transform (3x3 Matrix)
   ////////////////////////////////////////////////////////////////////////////////
 
-  template<typename T> 
+  template<typename T>
   struct LinearSpace3
     {
       // using vector_t = T;
@@ -167,7 +167,7 @@ namespace cuBQL {
       vy(ZeroTy(),OneTy(),ZeroTy()),
       vz(ZeroTy(),ZeroTy(),OneTy())
       {}
-        
+
       inline// __cubql_both
       LinearSpace3           ( const LinearSpace3& other ) = default;
       inline __cubql_both LinearSpace3& operator=( const LinearSpace3& other ) { vx = other.vx; vy = other.vy; vz = other.vz; return *this; }
@@ -255,8 +255,8 @@ namespace cuBQL {
   template<typename T> inline __cubql_both LinearSpace3<T> rcp       ( const LinearSpace3<T>& a ) { return a.inverse(); }
 
   /* constructs a coordinate frame form a normalized normal */
-  template<typename T>  
-  inline __cubql_both LinearSpace3<T> frame(const T &N) 
+  template<typename T>
+  inline __cubql_both LinearSpace3<T> frame(const T &N)
   {
     // #ifdef __CUDA_ARCH__
     const T dx0 = cross(T(OneTy(),ZeroTy(),ZeroTy()),N);
@@ -278,7 +278,7 @@ namespace cuBQL {
     const T dy = normalize(cross(N,dx));
     return LinearSpace3<T>(dx,dy,N);
   }
-  
+
   /* clamps linear space to range -1 to +1 */
   template<typename T> inline __cubql_both LinearSpace3<T> clamp(const LinearSpace3<T>& space) {
     return LinearSpace3<T>(clamp(space.vx,T(-1.0f),T(1.0f)),
@@ -298,7 +298,7 @@ namespace cuBQL {
   template<typename T> inline __cubql_both LinearSpace3<T> operator*(const LinearSpace3<T>& a, const LinearSpace3<T>& b) { return LinearSpace3<T>(a*b.vx, a*b.vy, a*b.vz); }
 
   template<typename T> inline __cubql_both LinearSpace3<T> operator/(const LinearSpace3<T>& a, const typename T::scalar_t & b) { return LinearSpace3<T>(a.vx/b, a.vy/b, a.vz/b); }
-  
+
   template<typename T> inline __cubql_both LinearSpace3<T> operator/(const LinearSpace3<T>& a, const LinearSpace3<T>& b) { return a * rcp(b); }
 
   template<typename T> inline LinearSpace3<T>& operator *=( LinearSpace3<T>& a, const LinearSpace3<T>& b ) { return a = a * b; }
@@ -315,7 +315,7 @@ namespace cuBQL {
   template<typename T> inline __cubql_both
   bool operator ==( const LinearSpace3<T>& a, const LinearSpace3<T>& b )
   { return a.vx == b.vx && a.vy == b.vy && a.vz == b.vz; }
-  
+
   template<typename T> inline __cubql_both
   bool operator !=( const LinearSpace3<T>& a, const LinearSpace3<T>& b )
   { return a.vx != b.vx || a.vy != b.vy || a.vz != b.vz; }
@@ -327,6 +327,11 @@ namespace cuBQL {
   template<typename T> inline std::ostream& operator<<(std::ostream& cout, const LinearSpace3<T>& m) {
     return cout << "{ vx = " << m.vx << ", vy = " << m.vy << ", vz = " << m.vz << "}";
   }
+
+  template<typename T>
+  inline __cubql_both dbgout operator<<(dbgout o, const LinearSpace3<T> &m)
+  { o  << "{ vx = " << m.vx << ", vy = " << m.vy << ", vz = " << m.vz << "}"; return o; }
+
 
   /*! Shortcuts for common linear spaces. */
   using LinearSpace2f  = LinearSpace2<vec2f> ;

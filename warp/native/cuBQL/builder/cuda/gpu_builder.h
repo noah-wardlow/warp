@@ -9,12 +9,11 @@
 #include "cuBQL/builder/cuda/elh_builder.h"
 
 namespace cuBQL {
-
   template<typename T, int D>
   struct is3f { enum { value = false }; };
   template<>
   struct is3f<float,3> { enum { value = true }; };
-  
+
   template<typename T, int D>
   void gpuBuilder(BinaryBVH<T,D>    &bvh,
                   const box_t<T,D>  *boxes,
@@ -27,7 +26,7 @@ namespace cuBQL {
 
     int devID;
     CUBQL_CUDA_CALL(GetDevice(&devID));
-    
+
     if (buildConfig.buildMethod == BuildConfig::SAH) {
       if (buildConfig.makeLeafThreshold == 0)
         // unless explicitly specified, use default for spatial median
@@ -69,7 +68,5 @@ namespace cuBQL {
       bvh.primIDs = 0;
     }
   }
-}
 
-
-
+} // ::cuBQL
