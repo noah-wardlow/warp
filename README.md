@@ -9,8 +9,9 @@
 
 **[Documentation](https://nvidia.github.io/warp/stable/)** | [Changelog](https://github.com/NVIDIA/warp/blob/main/CHANGELOG.md)
 
-> **AMD HIP/ROCm build:** this branch carries a port of Warp to AMD GPUs
-> (validated on gfx1151). Build instructions and status: [README-AMD.md](README-AMD.md);
+> **AMD HIP/ROCm build:** this branch carries a port of Warp to AMD GPUs and targets
+> gfx1151. Current validation status, build instructions, and measured scope:
+> [README-AMD.md](README-AMD.md);
 > known issues: [KNOWN_ISSUES-AMD.md](KNOWN_ISSUES-AMD.md).
 
 Warp is a Python framework for GPU-accelerated simulation, robotics, and machine learning. Warp takes
