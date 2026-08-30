@@ -4593,8 +4593,14 @@ template <typename Tile, typename... Indices> inline CUDA_CALLABLE auto tile_ext
 }
 
 template <typename Tile> inline CUDA_CALLABLE auto tile_extract(Tile& t, int i) { return tile_extract_impl(t, i); }
-template <typename Tile> inline CUDA_CALLABLE auto tile_extract(Tile& t, int i, int j) { return tile_extract_impl(t, i, j); }
-template <typename Tile> inline CUDA_CALLABLE auto tile_extract(Tile& t, int i, int j, int k) { return tile_extract_impl(t, i, j, k); }
+template <typename Tile> inline CUDA_CALLABLE auto tile_extract(Tile& t, int i, int j)
+{
+    return tile_extract_impl(t, i, j);
+}
+template <typename Tile> inline CUDA_CALLABLE auto tile_extract(Tile& t, int i, int j, int k)
+{
+    return tile_extract_impl(t, i, j, k);
+}
 template <typename Tile> inline CUDA_CALLABLE auto tile_extract(Tile& t, int i, int j, int k, int l)
 {
     return tile_extract_impl(t, i, j, k, l);

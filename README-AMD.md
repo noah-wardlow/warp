@@ -1,6 +1,6 @@
 # Warp on AMD HIP/ROCm
 
-AMD HIP/ROCm build of NVIDIA Warp 1.17.0.dev4 (upstream main).
+AMD HIP/ROCm build of NVIDIA Warp 1.18.0.dev0 (upstream main).
 
 ## Quickstart
 
@@ -10,12 +10,10 @@ turnkey option; if you already have Python 3.11/3.12 a plain `venv` works too �
 see [Environment setup](#environment-setup). The short version:
 
 ```bash
-# 0. Clone this branch. The repository is private: you need access, and the
-#    clone must go over SSH (or an authenticated HTTPS remote). git-lfs must
-#    be installed FIRST — the USD/NVDB test and example assets are LFS
-#    objects, and without it the clone silently contains pointer files.
+# 0. Clone the public ROCm branch. Install git-lfs first so the USD/NVDB test
+#    and example assets are materialized instead of left as pointer files.
 git lfs install
-git clone -b tomas/port-on-1.17-full git@github.com:tomasthoresen/warp
+git clone -b noah/gfx1151-rocm-port https://github.com/noah-wardlow/warp.git
 cd warp
 
 # 1. Create and activate an environment (Python 3.12; 3.11 also works)
@@ -35,19 +33,20 @@ pip install numpy setuptools packaging wheel
 #    LLVM/Clang toolchain dependency. Must run before step 4:
 #    `pip install -e .` expects warp/bin/warp.so to already exist.
 #    build_amd.sh auto-detects python/python3; override with
-#    PYTHON=/path/to/python
+#    PYTHON=/path/to/python.
 ./build_amd.sh
 
 # 4. Install into the active environment, then sanity-check the build.
-#    On ROCm 7.14, export LD_LIBRARY_PATH first (see Prerequisites) or
-#    warp.so will not load.
+#    For a nonstandard ROCm layout, export LD_LIBRARY_PATH first (see
+#    Prerequisites) or warp.so may not load.
 pip install -e .
 python tools/run_gfx1151_smoke.py
 ```
 
-Recommended ROCm version: **7.14.0** — the version all current recorded
-numbers were produced on. See [Choosing a ROCm version](#choosing-a-rocm-version),
-including a validated container route that needs no host ROCm upgrade.
+The current Warp/MJWarp port was validated on a Framework Desktop with a
+Radeon 8060S (`gfx1151`), Ubuntu 26.04, kernel 7.0.0-29, and the ROCm 7.2.2
+PyTorch container. The extended ROCm 7.14/Newton matrix retained below is a
+prior baseline, not a requirement for this branch.
 
 A passing smoke test means the build loads and runs kernels. It does **not**
 mean the build is sound: it runs two elementwise kernels on 1024 floats and
@@ -82,12 +81,13 @@ find /opt/rocm -name rocminfo -executable 2>/dev/null
 
 ## Choosing a ROCm version
 
-**Recommended: ROCm 7.14.0.** All current recorded numbers — the five-suite
+**Prior extended baseline: ROCm 7.14.0.** The recorded Newton numbers — the five-suite
 validation matrix (Warp, Newton, MuJoCo-Warp, benchmarks, CDNA build), the
 per-example Newton FPS figures, and the unit-test results — were produced on
 ROCm 7.14.0, run against an NVIDIA reference machine at the same commits.
-ROCm 7.2.x is also validated and remains necessary for one workload class
-below.
+The current Warp 1.18/MJWarp 3.12 validation uses ROCm 7.2.2. Its default
+stable-capture allocation path avoids captured `MEM_ALLOC` nodes on HIP; the
+raw runtime comparison below is retained as historical driver evidence.
 
 The two releases fail in opposite directions:
 
@@ -168,8 +168,8 @@ switch with `update-alternatives --set rocm /opt/rocm-<version>` plus
 
 Historical record of the original 1.12.0.dev0 port, retained for provenance.
 These pins were recorded in May 2026 against Newton 1.0.0 and do **not**
-describe the current tree, which is Warp 1.17.0.dev4 with Newton 1.4.0 and 104
-examples.
+describe the current tree. The later extended Newton sweep recorded below used
+Warp 1.17.0.dev4 with Newton 1.4.0 and 104 examples.
 
 ```
 warp-lang             1.12.0.dev0   # editable install of an AMD port branch
@@ -229,7 +229,7 @@ follows. Confirm the holds with `apt-mark showhold | grep linux`.
 ### Verifying the environment matches the baseline
 
 This subsection applies to the historical 1.12 baseline above, not to the
-current 1.17.0.dev4 stack: on the current configuration the script exits
+current 1.18.0.dev0 stack: on the current configuration the script exits
 nonzero by design (it checks the 1.12-era kernel and package pins). Run it only to compare
 against that baseline:
 

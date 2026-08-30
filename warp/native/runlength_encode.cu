@@ -10,6 +10,7 @@
 #define THRUST_IGNORE_CUB_VERSION_CHECK
 #if defined(__HIP_PLATFORM_AMD__)
 #include "hip_util.h"
+
 #include <hipcub/hipcub.hpp>
 namespace cub = hipcub;
 #else
@@ -29,7 +30,8 @@ void runlength_encode_device(int n, const T* values, T* run_values, int* run_len
 
     // hipCUB rejects managed memory for temp buffers.
     // Force mempool path even on UMA devices.
-    void* temp_buffer = wp_alloc_device_async(WP_CURRENT_CONTEXT, buff_size, WP_CURRENT_STREAM, "(native:runlength_encode)");
+    void* temp_buffer
+        = wp_alloc_device_async(WP_CURRENT_CONTEXT, buff_size, WP_CURRENT_STREAM, "(native:runlength_encode)");
 
     check_cuda(
         cub::DeviceRunLengthEncode::Encode(

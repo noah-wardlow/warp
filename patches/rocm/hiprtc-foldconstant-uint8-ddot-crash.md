@@ -69,7 +69,10 @@ Launching this kernel on a HIP device compiles it with `-DNDEBUG -O3` and
 segfaults the process via HIPRTC:
 ```python
 import warp as wp
+
 u8mat22 = wp._src.types.matrix(shape=(2, 2), dtype=wp.uint8)
+
+
 @wp.kernel
 def k(v: wp.array(dtype=u8mat22), s: wp.array(dtype=u8mat22), out: wp.array(dtype=wp.uint8)):
     out[0] = wp.uint8(2) * wp.ddot(v[0], s[0])

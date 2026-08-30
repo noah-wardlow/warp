@@ -405,8 +405,8 @@ bool wp_texture_copy_device(
         // device staging -> host (readback) after the array copy
         if (staging && !to_array && e == hipSuccess) {
             e = hipMemcpy2DAsync(
-                reinterpret_cast<void*>(linear_handle), linear_pitch, staging, width_bytes, width_bytes,
-                rows * depth, hipMemcpyDeviceToHost, cuda_stream
+                reinterpret_cast<void*>(linear_handle), linear_pitch, staging, width_bytes, width_bytes, rows * depth,
+                hipMemcpyDeviceToHost, cuda_stream
             );
         }
 

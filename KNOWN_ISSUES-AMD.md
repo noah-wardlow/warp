@@ -1,7 +1,7 @@
 # Known issues — Warp on AMD HIP/ROCm (gfx1151)
 
 Status of the gfx1151 (Strix Halo APU, RDNA 3.5, wave32) port, now on upstream
-main at Warp 1.17.0.dev4. Current test counts are in the 1.17.0.dev4 section
+main at Warp 1.18.0.dev0. Current test counts are in the 1.18.0.dev0 section
 below; counts in the dated sections further down were produced on the stack
 recorded there (the oldest from a clean, orphan-reaped, serial run of the full
 suite on ROCm 7.2).
@@ -9,9 +9,9 @@ suite on ROCm 7.2).
 The items below are the remaining gaps. Each is characterized so a reader can
 tell a genuine hardware/driver limitation from an open bug.
 
-## Warp 1.17.0.dev4 — current status
+## Warp 1.18.0.dev0 — current status
 
-The port now applies to upstream main at Warp 1.17.0.dev4. The sections below
+The port now applies to upstream main at Warp 1.18.0.dev0. The sections below
 were written against the 1.15.0 and 1.12.1 bases and are retained as recorded;
 resolution notes are added in place where the current base changes a verdict.
 
@@ -267,7 +267,7 @@ backend is exactly what caused the graph memory-free crash above.
   and with test composition and did not track the capture-dependency flag
   value (see the dependency-flag entry below). That intermittency is resolved
   on the current base: it was the replayed-graph external-event semantics
-  (1.17.0.dev4 section above), not this allocation-node defect, and the tests
+  (1.18.0.dev0 section above), not this allocation-node defect, and the tests
   pass with the host-side event workaround.
 
   What is *not* enabled is the branch that adds a `MemFreeNode`, which is what
@@ -331,7 +331,7 @@ backend is exactly what caused the graph memory-free crash above.
   so HIP's external-event-in-graph support looks incomplete beyond the flag and
   the test still fails. The mapping was wrong either way. The residual failure
   is now root-caused: ROCm's replayed-graph external-event semantics
-  (1.17.0.dev4 section above).
+  (1.18.0.dev0 section above).
 
 ### Open bugs (under investigation, not yet fixed)
 
@@ -761,8 +761,8 @@ Caveats:
 ### Deep / open bugs
 
 - **`test_fem` / `test_sparse` — `test_capturability` — resolved on the
-  1.17.0.dev4 base.** The zero `nnz` after replay was the replayed-graph
-  external-event semantics (1.17.0.dev4 section above): `nnz_sync()` waits on
+  1.18.0.dev0 base.** The zero `nnz` after replay was the replayed-graph
+  external-event semantics (1.18.0.dev0 section above): `nnz_sync()` waits on
   an event recorded with the external flag during capture, and the host wait
   returned before the replayed record node executed. The host-side workaround
   resolves it and the tests pass on the current base. The record below stands
@@ -1023,7 +1023,7 @@ Caveats:
 
 - **`test_streams`** — two event tests still fail on the current base:
   `test_event_elapsed_time_graph` and `test_event_external`, both now
-  root-caused to ROCm's replayed-graph external-event semantics (1.17.0.dev4
+  root-caused to ROCm's replayed-graph external-event semantics (1.18.0.dev0
   section above) — the device side, which the host-side workaround does not
   cover. `test_stream_priority_timings` (a timing-based assertion — inherently
   fragile, returns 0 elapsed for a tiny kernel on this iGPU) is no longer
@@ -1058,7 +1058,7 @@ cleanly; the UMA hybrid allocator falls back to the capture-safe mempool path.
 
 ## Newton examples (96 of 104 passing)
 
-Current status at the 1.17.0.dev4 base on ROCm 7.14.0 with Newton 1.4.0
+Recorded status at the 1.17.0.dev4 base on ROCm 7.14.0 with Newton 1.4.0
 (`tomas/gfx1151-fixes` branch): 96 of 104 examples run to completion in the
 sweep. The non-runners are all in documented platform classes: the
 graph-replay fault class (several of them intermittent rather than

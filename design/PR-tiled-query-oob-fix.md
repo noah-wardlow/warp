@@ -76,12 +76,14 @@ import warp as wp
 
 wp.init()
 
+
 @wp.kernel
 def tiled_aabb(mesh: wp.uint64, lo: wp.vec3, hi: wp.vec3, out: wp.array(dtype=int)):
     # block-wide cooperative tiled AABB query
     q = wp.mesh_query_aabb(mesh, lo, hi)
     t = wp.tile_mesh_query_aabb_next(q)
     # ... process results ...
+
 
 # Build a mesh and run the tiled query repeatedly; on gfx1151 this faults
 # nondeterministically (~50% of processes) with:

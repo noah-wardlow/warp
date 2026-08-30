@@ -17,6 +17,7 @@
 
 #if defined(__HIP_PLATFORM_AMD__)
 #include "hip_util.h"
+
 #include <hipcub/hipcub.hpp>
 namespace cub = hipcub;
 #else
@@ -300,11 +301,11 @@ void radix_sort_pairs_device(void* context, KeyType* keys, ValueType* values, in
     // the caller would carry on with data that was never sorted; the BVH Morton
     // ordering is one such caller, and a tree built from unsorted keys goes
     // wrong far from here. Retry once, and say so if the retry also fails.
-    cudaError_t sort_err =
-        cub::DeviceRadixSort::SortPairs(temp.mem, temp.size, d_keys, d_values, n, begin_bit, end_bit, stream);
+    cudaError_t sort_err
+        = cub::DeviceRadixSort::SortPairs(temp.mem, temp.size, d_keys, d_values, n, begin_bit, end_bit, stream);
     if (sort_err != cudaSuccess) {
-        sort_err =
-            cub::DeviceRadixSort::SortPairs(temp.mem, temp.size, d_keys, d_values, n, begin_bit, end_bit, stream);
+        sort_err
+            = cub::DeviceRadixSort::SortPairs(temp.mem, temp.size, d_keys, d_values, n, begin_bit, end_bit, stream);
     }
     if (sort_err != cudaSuccess) {
         wp::set_error_string(

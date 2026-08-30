@@ -4,6 +4,7 @@
 import builtins
 import ctypes
 import errno
+import glob
 import hashlib
 import json
 import ntpath
@@ -46,10 +47,12 @@ _resolved_kernel_cache_dir: str | None = None
 # modules keep the smaller/faster release codegen) and only retries without it if
 # the compiler segfaults. Set the env var to 0 to force AOT for all HIP modules
 # (e.g. if a small module hits the trigger). See KNOWN_ISSUES-AMD.md and patches/rocm/.
-WP_HIP_HIPRTC_MAX_SRC_BYTES = int(os.environ.get("WARP_HIP_HIPRTC_MAX_SRC_BYTES", 2_000_000))
+WP_HIP_HIPRTC_MAX_SRC_BYTES = int(os.environ.get("WARP_HIP_HIPRTC_MAX_SRC_BYTES", "2000000"))
 
 
-def _hipcc_genco_cmd(hipcc, cu_path, output_path, arch_suffix, inc_dirs, config, optimization_level, fast_math, fuse_fp, lineinfo, ndebug):
+def _hipcc_genco_cmd(
+    hipcc, cu_path, output_path, arch_suffix, inc_dirs, config, optimization_level, fast_math, fuse_fp, lineinfo, ndebug
+):
     """Build a hipcc --genco command mirroring the HIPRTC options in warp.cu's
     wp_cuda_compile_program. ``ndebug`` controls whether -DNDEBUG is added."""
     cmd = [hipcc, "--genco", f"--offload-arch={arch_suffix}", "-std=c++17", "-fPIC"]
@@ -73,7 +76,9 @@ def _hipcc_genco_cmd(hipcc, cu_path, output_path, arch_suffix, inc_dirs, config,
     return cmd
 
 
-def _build_hip_aot(cu_path, output_path, arch_suffix, inc_dirs, config, optimization_level, fast_math, fuse_fp, lineinfo):
+def _build_hip_aot(
+    cu_path, output_path, arch_suffix, inc_dirs, config, optimization_level, fast_math, fuse_fp, lineinfo
+):
     """Compile a HIP module out-of-process with hipcc --genco. Used for large HIP
     modules so the ROCm clang backend crash (SelectionDAG FoldConstantArithmetic on
     e.g. a uint8 matrix ddot with -DNDEBUG at -O2/-O3) is isolated from the Warp
@@ -91,8 +96,17 @@ def _build_hip_aot(cu_path, output_path, arch_suffix, inc_dirs, config, optimiza
     last = None
     for ndebug in (True, False):
         cmd = _hipcc_genco_cmd(
-            hipcc, cu_path, output_path, arch_suffix, inc_dirs, config, optimization_level, fast_math, fuse_fp,
-            lineinfo, ndebug,
+            hipcc,
+            cu_path,
+            output_path,
+            arch_suffix,
+            inc_dirs,
+            config,
+            optimization_level,
+            fast_math,
+            fuse_fp,
+            lineinfo,
+            ndebug,
         )
         result = subprocess.run(cmd, capture_output=True, text=True)  # noqa: PLW1510
         if result.returncode == 0 and os.path.exists(output_path):
@@ -106,6 +120,42 @@ def _build_hip_aot(cu_path, output_path, arch_suffix, inc_dirs, config, optimiza
 
     tail = (last.stderr or last.stdout or "")[-2000:] if last is not None else ""
     raise Exception(f"HIP AOT (hipcc) build failed with code {getattr(last, 'returncode', '?')}:\n{tail}")
+
+
+def _get_extra_include_dirs(extra_include_dirs) -> list[str]:
+    include_dirs: list[str] = []
+    invalid_dirs: list[str] = []
+
+    for entry in extra_include_dirs:
+        path = os.fspath(entry)
+        if not os.path.isabs(path):
+            invalid_dirs.append(f"{path!r} (not absolute)")
+            continue
+
+        normalized_path = os.path.realpath(path)
+        if not os.path.isdir(normalized_path):
+            invalid_dirs.append(f"{path!r} (not a directory)")
+            continue
+
+        include_dirs.append(normalized_path)
+
+    if invalid_dirs:
+        raise ValueError("extra_include_dirs entries must be absolute existing directories: " + ", ".join(invalid_dirs))
+    return include_dirs
+
+
+def _get_extra_include_dir_bytes(extra_include_dirs) -> list[bytes]:
+    return [path.encode("utf-8") for path in _get_extra_include_dirs(extra_include_dirs)]
+
+
+def _get_hip_include_dirs() -> list[str]:
+    """Return the ROCm and host-toolchain headers required by HIPRTC."""
+    rocm_path = os.environ.get("ROCM_PATH", "/opt/rocm")
+    gcc_include_dirs = sorted(glob.glob("/usr/lib/gcc/*/*/include"))
+    include_dirs = [os.path.join(rocm_path, "include")]
+    if gcc_include_dirs:
+        include_dirs.append(gcc_include_dirs[-1])
+    return include_dirs
 
 
 # builds cuda source to PTX or CUBIN using NVRTC (output type determined by output_path extension)
@@ -127,31 +177,39 @@ def build_cuda(
     arch_suffix="",
     llvm_cuda=False,
     use_precompiled_headers=True,
+    extra_include_dirs=(),
 ) -> None:
     with open(cu_path, "rb") as src_file:
         src = src_file.read()
     cu_path_bytes = cu_path.encode("utf-8")
     program_name_bytes = os.path.basename(cu_path).encode("utf-8")
     inc_path = os.path.join(warp_home, "native").encode("utf-8")
-    # AMD HIP: hipRTC needs system headers (float.h, stddef.h, etc.)
-    import glob
-    gcc_includes = glob.glob("/usr/lib/gcc/x86_64-linux-gnu/*/include")
-    hip_extra_includes = gcc_includes[-1] if gcc_includes else "/usr/lib/gcc/x86_64-linux-gnu/13/include"
-
-    # HIP (arch=0, arch_suffix like "gfx1151"): route very large modules to the
-    # out-of-process hipcc AOT path, which sidesteps the in-process HIPRTC crash.
     is_hip = arch == 0 and arch_suffix and arch_suffix.startswith("gfx")
+    resolved_extra_include_dirs = list(extra_include_dirs)
+    if is_hip:
+        resolved_extra_include_dirs.extend(_get_hip_include_dirs())
+    resolved_extra_include_dirs = list(dict.fromkeys(_get_extra_include_dirs(resolved_extra_include_dirs)))
+
+    # Route very large HIP modules to the out-of-process hipcc AOT path, which
+    # sidesteps the in-process HIPRTC crash.
     if is_hip and not llvm_cuda and len(src) > WP_HIP_HIPRTC_MAX_SRC_BYTES:
-        inc_dirs = [os.path.join(warp_home, "native"), "/opt/rocm/include", hip_extra_includes]
+        inc_dirs = [os.path.join(warp_home, "native"), *resolved_extra_include_dirs]
         _build_hip_aot(
             cu_path, output_path, arch_suffix, inc_dirs, config, optimization_level, fast_math, fuse_fp, lineinfo
         )
         return
 
+    extra_cuda_include_dirs = _get_extra_include_dir_bytes(resolved_extra_include_dirs)
+    num_cuda_include_dirs = len(extra_cuda_include_dirs)
+    cuda_include_dirs = (
+        (ctypes.c_char_p * num_cuda_include_dirs)(*extra_cuda_include_dirs) if num_cuda_include_dirs else None
+    )
     output_path = output_path.encode("utf-8")
 
     if llvm_cuda:
-        err = warp._src.context.runtime.llvm.wp_compile_cuda(src, cu_path_bytes, inc_path, output_path, False)
+        err = warp._src.context.runtime.llvm.wp_compile_cuda(
+            src, cu_path_bytes, inc_path, num_cuda_include_dirs, cuda_include_dirs, output_path, False
+        )
     else:
         if ltoirs is None:
             ltoirs = []
@@ -170,24 +228,14 @@ def build_cuda(
         # isolated between threads and processes to avoid .pch races.
         pch_dir_bytes = pch_dir.encode("utf-8") if pch_dir else None
         arch_suffix_bytes = arch_suffix.encode("utf-8")
-        # For HIP (arch=0, arch_suffix starts with "gfx"): add ROCm and GCC system
-        # include paths so hipRTC can find <hip/hip_runtime.h>, <stddef.h>, etc.
-        is_hip = (arch == 0 and arch_suffix and arch_suffix.startswith("gfx"))
-        if is_hip:
-            extra_inc_dirs = [b"/opt/rocm/include", hip_extra_includes.encode("utf-8")]
-            num_extra_inc = len(extra_inc_dirs)
-            arr_extra_inc = (ctypes.c_char_p * num_extra_inc)(*extra_inc_dirs)
-        else:
-            num_extra_inc = 0
-            arr_extra_inc = None
         err = warp._src.context.runtime.core.wp_cuda_compile_program(
             src,
             program_name_bytes,
             arch,
             arch_suffix_bytes,
             inc_path,
-            num_extra_inc,
-            arr_extra_inc,
+            num_cuda_include_dirs,
+            cuda_include_dirs,
             config == "debug",
             optimization_level,
             warp.config.verbose or warp.config.log_level <= LOG_DEBUG,
@@ -230,18 +278,17 @@ def build_cpu(
     pch_dir=None,
     block_dim=256,
     enable_tiles_in_stack_memory=True,
+    extra_include_dirs=(),
 ):
     with open(cpp_path, "rb") as cpp:
         src = cpp.read()
     cpp_path = cpp_path.encode("utf-8")
     inc_path = os.path.join(warp_home, "native").encode("utf-8")
-    # AMD HIP: hipRTC needs system headers (float.h, stddef.h, etc.)
-    import glob
-    gcc_includes = glob.glob("/usr/lib/gcc/x86_64-linux-gnu/*/include")
-    hip_extra_includes = gcc_includes[-1] if gcc_includes else "/usr/lib/gcc/x86_64-linux-gnu/13/include"
     obj_path = obj_path.encode("utf-8")
 
     flags_list = extra_flags.split()
+    for include_dir in _get_extra_include_dirs(extra_include_dirs):
+        flags_list.extend(("-I", include_dir))
     flags_array = (ctypes.c_char_p * (len(flags_list) + 1))(*[f.encode("utf-8") for f in flags_list], None)
 
     pch_dir_bytes = pch_dir.encode("utf-8") if pch_dir else None

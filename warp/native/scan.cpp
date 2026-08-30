@@ -4,6 +4,7 @@
 #include "warp.h"
 
 #include "scan.h"
+
 #include <cstddef>
 extern "C" void* wp_alloc_host(size_t s, const char* tag);
 extern "C" void wp_free_host(void* ptr);

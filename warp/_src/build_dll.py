@@ -964,7 +964,7 @@ def build_dll_for_arch(
                         # Match nvcc/NVRTC default: strict IEEE 754 FP semantics.
                         # Without these, hipcc may aggressively optimize hipcub templates
                         # into pathologically slow / non-terminating compilation.
-                        # -real-true16 off: ROCm 7.2's AMDGPU backend mis-allocates the
+                        # -real-true16 off: ROCm 7.2's AMDGPU backend incorrectly allocates the
                         # _hi16/_lo16 subregisters of RDNA3.5 true16 mode for packed
                         # float16/bfloat16 code, failing at -O2/-O3 with "incorrect
                         # register class". Force 16-bit ops through 32-bit registers.
@@ -974,18 +974,18 @@ def build_dll_for_arch(
                         )
                         if mode == "debug":
                             cuda_cmd = (
-                                f'{hipcc_cmd} -x hip -std=c++17 -g -O0 -fPIC -fvisibility=hidden '
-                                f'-D_DEBUG -D_ITERATOR_DEBUG_LEVEL=0 {hip_fp_flags} {hip_arch_flags} -DWP_ENABLE_CUDA=1 '
+                                f"{hipcc_cmd} -x hip -std=c++17 -g -O0 -fPIC -fvisibility=hidden "
+                                f"-D_DEBUG -D_ITERATOR_DEBUG_LEVEL=0 {hip_fp_flags} {hip_arch_flags} -DWP_ENABLE_CUDA=1 "
                                 # match the host g++ ABI so std::string crosses the .cu/.cpp boundary
-                                f'-D_GLIBCXX_USE_CXX11_ABI=0 '
+                                f"-D_GLIBCXX_USE_CXX11_ABI=0 "
                                 f'-D__HIP_PLATFORM_AMD__ -I"{native_dir}" -D{mathdx_enabled} {libmathdx_includes} '
                                 f'-o "{cu_out}" -c "{cu_path}"'
                             )
                         elif mode == "release":
                             cuda_cmd = (
-                                f'{hipcc_cmd} -x hip -std=c++17 -O3 -fPIC -fvisibility=hidden -DNDEBUG '
+                                f"{hipcc_cmd} -x hip -std=c++17 -O3 -fPIC -fvisibility=hidden -DNDEBUG "
                                 # match the host g++ ABI so std::string crosses the .cu/.cpp boundary
-                                f'-D_GLIBCXX_USE_CXX11_ABI=0 '
+                                f"-D_GLIBCXX_USE_CXX11_ABI=0 "
                                 f'{hip_fp_flags} {hip_arch_flags} -DWP_ENABLE_CUDA=1 -D__HIP_PLATFORM_AMD__ -I"{native_dir}" '
                                 f'-D{mathdx_enabled} {libmathdx_includes} -o "{cu_out}" -c "{cu_path}"'
                             )

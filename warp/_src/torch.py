@@ -228,6 +228,7 @@ def from_torch(
         sync = t.is_cuda and warp.device_from_torch(t.device).is_hip
     if sync and t.is_cuda:
         import torch  # noqa: PLC0415
+
         torch.cuda.current_stream(t.device).synchronize()
 
     if dtype is None:

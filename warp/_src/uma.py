@@ -85,7 +85,7 @@ class ReadbackBuffer:
     """
 
     def __init__(self, shape, dtype=float, device=None):
-        import warp
+        import warp  # noqa: PLC0415
 
         self.device = warp.get_device(device)
         self.shape = (int(shape),) if isinstance(shape, int) else tuple(int(s) for s in shape)
@@ -133,7 +133,7 @@ class ReadbackBuffer:
         Zero-copy view on unified memory (no device->host copy); an ordinary
         copying readback otherwise.
         """
-        import warp
+        import warp  # noqa: PLC0415
 
         warp.synchronize_device(self.device)
         return self._view if self.zero_copy else self.array.numpy()
