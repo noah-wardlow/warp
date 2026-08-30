@@ -11,6 +11,10 @@ Last audited: 2026-08-29.
 The current Warp 1.18 branch builds and passes its compiler/diagnostic checks,
 but the complete current-commit GPU suites have not finished.
 
+With the GPU hidden, the current default suite completed 3,713 tests in two
+workers: 3,166 passed, 547 skipped, and none failed or errored. This validates
+CPU and backend-neutral behavior; it does not lift the GPU validation gate.
+
 After an interrupted eight-worker Warp suite, the host ROCm 7.2.2 runtime
 entered a state where `hipStreamCreate` blocks in a fresh process. The same
 call blocks through `libamdhip64.so` without importing Warp, while `rocminfo`

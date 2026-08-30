@@ -168,6 +168,7 @@ All counts below describe completed commands. Skips are retained as skips.
 | --- | ---: | --- |
 | Current Warp 1.18 clean native build | pass | HIP runtime, HIPRTC, LLVM, cuBQL, `gfx1151` |
 | Current compiler and diagnostics | 15 passed | Merged HIP include resolution and diagnostic structure |
+| Current default suite, GPU hidden | 3,166 passed, 547 skipped | 3,713 tests, two workers, 0 failures/errors; CPU and availability surfaces only |
 | Streams/events | 22 passed, 3 skipped | Preceding integrated port |
 | Stable capture allocations | 5 passed | Sparse, APIC, and FEM regressions on preceding integrated port |
 | Low precision/capabilities | 223 passed, 5 skipped | Preceding integrated port |
