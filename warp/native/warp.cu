@@ -458,15 +458,16 @@ static ContextInfo* get_context_info(CUcontext ctx)
         if (check_cu(cuCtxGetDevice_f(&device))) {
             DeviceInfo* device_info = g_device_map[device];
 
-            // Work around a CUDA driver bug observed with Linux driver 535.54.03: cudaFreeAsync() could crash when
-            // directly freeing a graph allocation on an uninitialized default stream. Prime the stream's allocator
-            // bookkeeping with an ordinary asynchronous allocation and free.
             if (device_info->is_mempool_supported) {
+#if !defined(__HIP_PLATFORM_AMD__)
+                // Work around a CUDA driver bug observed with Linux driver 535.54.03: cudaFreeAsync() could crash when
+                // directly freeing a graph allocation on an uninitialized default stream. Prime the stream's allocator
+                // bookkeeping with an ordinary asynchronous allocation and free. Do not run this NVIDIA-specific
+                // workaround on HIP: a wedged ROCm async pool would otherwise make Warp initialization hang.
                 void* dummy = NULL;
                 check_cuda(cudaMallocAsync(&dummy, 1, NULL));
                 check_cuda(cudaFreeAsync(dummy, NULL));
-
-#if defined(__HIP_PLATFORM_AMD__)
+#else
                 // gfx1151/ROCm: the async pool's default "opportunistic reuse"
                 // hands a just-freed block back to a new allocation before the
                 // free has actually completed on its stream. On ROCm 7.2 this
@@ -483,7 +484,7 @@ static ContextInfo* get_context_info(CUcontext ctx)
                     hipMemPoolSetAttribute(pool, hipMemPoolReuseAllowOpportunistic, &disable);
                     hipMemPoolSetAttribute(pool, hipMemPoolReuseAllowInternalDependencies, &disable);
                 }
-#endif
+#endif  // !defined(__HIP_PLATFORM_AMD__)
             }
 
             ContextInfo context_info;
