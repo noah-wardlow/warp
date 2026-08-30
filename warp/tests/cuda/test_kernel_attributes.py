@@ -49,11 +49,12 @@ generic_float_attribute_kernel = wp.overload(generic_attribute_kernel, [wp.array
 @wp.struct
 class ExternalConstantParams:
     value: wp.float32
+    output: wp.array[wp.float32]
 
 
 @wp.kernel(enable_backward=False, entry_point_abi="external_constant_params", module="unique")
 def external_constant_params_attribute_kernel(params: ExternalConstantParams):
-    value = params.value
+    params.output[0] = params.value
 
 
 def constructor_kernel_func(out: wp.array[float]):

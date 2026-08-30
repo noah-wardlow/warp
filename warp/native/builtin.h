@@ -410,17 +410,27 @@ CUDA_CALLABLE inline float bfloat16_to_float(wp_bfloat16 x) { return wp_bfloat16
 
 #elif defined(__HIP_DEVICE_COMPILE__)
 
-// Use HIP intrinsics for half-precision conversion on AMD GPUs
-// __float2half_rn() uses round-to-nearest-even (matches CUDA's cvt.rn.f16.f32)
-// __half2float() matches CUDA's cvt.f32.f16
+// Keep the conversions as explicit ISA operations.  HIP's C++ conversion
+// intrinsics can be folded through adjacent arithmetic when fp contraction is
+// enabled, which removes the binary16 rounding point required by Warp's half
+// operators.  The volatile asm also mirrors the conversion barriers provided
+// by the PTX asm in the CUDA branch above.
 CUDA_CALLABLE inline half float_to_half(float x)
 {
     half h;
-    h.u = __half_as_ushort(__float2half_rn(x));
+    unsigned int bits;
+    asm volatile("v_cvt_f16_f32 %0, %1" : "=v"(bits) : "v"(x));
+    h.u = static_cast<unsigned short>(bits);
     return h;
 }
 
-CUDA_CALLABLE inline float half_to_float(half h) { return __half2float(__ushort_as_half(h.u)); }
+CUDA_CALLABLE inline float half_to_float(half h)
+{
+    float value;
+    unsigned int bits = h.u;
+    asm volatile("v_cvt_f32_f16 %0, %1" : "=v"(value) : "v"(bits));
+    return value;
+}
 
 #ifndef WP_NO_BFLOAT16
 // HIP has no native bf16 conversion intrinsic exposed here; use the software

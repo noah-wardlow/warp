@@ -12,6 +12,8 @@ import warp._src.codegen as codegen
 from warp._src.context import ModuleBuilder
 from warp.tests.unittest_utils import add_function_test, assert_np_equal, get_test_devices
 
+has_nvidia_cuda_device = any(not device.is_hip for device in wp.get_cuda_devices())
+
 
 def module_source(kernel, device: str) -> str:
     """Generate the full module source, including @wp.func bodies, for a kernel's module."""
@@ -167,7 +169,7 @@ class TestFuncInline(unittest.TestCase):
         called = re.search(rf"call\.uni[^;]*?{name}", ptx, re.S) is not None
         return defined, called
 
-    @unittest.skipUnless(wp.is_cuda_available(), "requires CUDA support")
+    @unittest.skipUnless(has_nvidia_cuda_device, "requires an NVIDIA CUDA device for PTX inspection")
     def test_noinline_honored_in_ptx(self):
         """Check ``inline=False`` keeps a helper out of line in an optimized build.
 
@@ -180,7 +182,7 @@ class TestFuncInline(unittest.TestCase):
         self.assertTrue(defined, "inline=False helper was inlined away")
         self.assertTrue(called, "inline=False helper has no call site")
 
-    @unittest.skipUnless(wp.is_cuda_available(), "requires CUDA support")
+    @unittest.skipUnless(has_nvidia_cuda_device, "requires an NVIDIA CUDA device for PTX inspection")
     def test_forceinline_honored_in_ptx(self):
         """Check ``inline=True`` inlines a helper in a debug build.
 

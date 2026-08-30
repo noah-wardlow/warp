@@ -42,6 +42,25 @@ def test_fp16_conversion(test, device):
 
 
 @wp.kernel
+def half_arithmetic_rounding(values: wp.array[wp.float16], output: wp.array[wp.float16]):
+    lhs = values[0] * values[1]
+    rhs = values[2] * values[3]
+    output[0] = lhs - rhs
+
+
+def test_fp16_arithmetic_rounding(test, device):
+    """Each half arithmetic operation must round before the next operation."""
+    values = np.array([-1.578125, 0.7880859375, 2.576171875, -0.7353515625], dtype=np.float16)
+    expected = np.float16(np.float16(values[0] * values[1]) - np.float16(values[2] * values[3]))
+
+    wp_values = wp.array(values, dtype=wp.float16, device=device)
+    output = wp.empty(1, dtype=wp.float16, device=device)
+    wp.launch(half_arithmetic_rounding, dim=1, inputs=[wp_values, output], device=device)
+
+    assert_np_equal(np.array([expected], dtype=np.float16), output.numpy())
+
+
+@wp.kernel
 def value_load_store_half(f16_value: wp.float16, f16_array: wp.array[wp.float16]):
     wp.expect_eq(f16_value, f16_array[0])
 
@@ -115,6 +134,7 @@ for cuda_device in get_selected_cuda_test_devices():
         devices.append(cuda_device)
 
 add_function_test(TestFp16, "test_fp16_conversion", test_fp16_conversion, devices=devices)
+add_function_test(TestFp16, "test_fp16_arithmetic_rounding", test_fp16_arithmetic_rounding, devices=devices)
 add_function_test(TestFp16, "test_fp16_grad", test_fp16_grad, devices=devices)
 add_function_test(TestFp16, "test_fp16_kernel_parameter", test_fp16_kernel_parameter, devices=devices)
 
