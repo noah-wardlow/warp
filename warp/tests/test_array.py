@@ -3675,7 +3675,12 @@ def test_array_runtime_zero_step(test, device):
     result = _run_runtime_zero_step_subprocess(device.alias)
     output = result.stdout + result.stderr
     test.assertRegex(output, "slice step cannot be zero")
-    if device.is_cuda:
+    if device.is_hip:
+        # HIP terminates the child from its device assertion callback before
+        # Warp's synchronization wrapper can emit the CUDA-compatible error.
+        test.assertNotEqual(result.returncode, 0)
+        test.assertRegex(output, r"(?i)device-side assertion|HSA_STATUS_ERROR_EXCEPTION")
+    elif device.is_cuda:
         test.assertRegex(output, "Warp CUDA error")
     else:
         test.assertNotEqual(result.returncode, 0)

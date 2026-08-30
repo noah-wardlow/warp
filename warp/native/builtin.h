@@ -2127,8 +2127,15 @@ CUDA_CALLABLE inline void slice_assert_step_nonzero(const slice_t& slice)
     printf("slice step cannot be zero\n");
     __trap();
 #elif defined(__HIP_DEVICE_COMPILE__)
+#if defined(_WIN32)
     printf("slice step cannot be zero\n");
     __builtin_trap();
+#else
+    // HIP's printf buffer is not guaranteed to flush before a raw trap. Call
+    // the device assertion helper directly so release builds retain the
+    // diagnostic even when NDEBUG disables the assert() macro.
+    __assert_fail("slice step cannot be zero", __FILE__, unsigned(__LINE__), __PRETTY_FUNCTION__);
+#endif
 #else
     _wp_assert("slice step cannot be zero", __FILE__, unsigned(__LINE__));
 #endif
