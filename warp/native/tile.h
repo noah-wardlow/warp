@@ -419,12 +419,27 @@ inline CUDA_CALLABLE bool tile_check_coord_bounds(const Coord& c, const char* st
         const int dim = Shape::dim(d);
 
         if (index < 0 || index >= dim) {
+#if defined(__HIP_DEVICE_COMPILE__) && !defined(_WIN32)
+            // ROCm does not reliably flush the device printf buffer when an
+            // assertion terminates a kernel. Put the storage kind in the
+            // assertion itself so the fatal diagnostic remains actionable.
+            if (storage[0] == 's') {
+                __assert_fail(
+                    "Warp tile index out of bounds in shared tile", __FILE__, unsigned(__LINE__), __PRETTY_FUNCTION__
+                );
+            } else {
+                __assert_fail(
+                    "Warp tile index out of bounds in register tile", __FILE__, unsigned(__LINE__), __PRETTY_FUNCTION__
+                );
+            }
+#else
             printf(
                 "Warp tile index out of bounds in %s tile: coordinate dimension %d has index %d, outside valid range "
                 "[0, %d) (tile rank=%d)\n",
                 storage, d, index, dim, Shape::N
             );
             assert(0 && "Warp tile index out of bounds");
+#endif
             return false;
         }
     }
@@ -435,8 +450,20 @@ inline CUDA_CALLABLE bool tile_check_coord_bounds(const Coord& c, const char* st
 template <int Size> inline CUDA_CALLABLE bool tile_check_linear_bounds(int linear, const char* storage)
 {
     if (linear < 0 || linear >= Size) {
+#if defined(__HIP_DEVICE_COMPILE__) && !defined(_WIN32)
+        if (storage[0] == 's') {
+            __assert_fail(
+                "Warp tile index out of bounds in shared tile", __FILE__, unsigned(__LINE__), __PRETTY_FUNCTION__
+            );
+        } else {
+            __assert_fail(
+                "Warp tile index out of bounds in register tile", __FILE__, unsigned(__LINE__), __PRETTY_FUNCTION__
+            );
+        }
+#else
         printf("Warp tile index out of bounds in %s tile: linear index %d is outside [0, %d)\n", storage, linear, Size);
         assert(0 && "Warp tile index out of bounds");
+#endif
         return false;
     }
 
