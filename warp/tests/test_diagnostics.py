@@ -107,7 +107,8 @@ class TestDiagnostics(unittest.TestCase):
             self.assertGreaterEqual(len(devices), 2, "CUDA available but no CUDA device in list")
             cuda_dev = devices[1]
             warp_dev = wp.get_device(cuda_dev["alias"])
-            self.assertRegex(cuda_dev["arch"], r"^sm_\d+$")
+            expected_arch = warp_dev.arch_str or f"sm_{warp_dev.arch}"
+            self.assertEqual(cuda_dev["arch"], expected_arch)
             self.assertIsInstance(cuda_dev["sm_count"], int)
             self.assertGreater(cuda_dev["sm_count"], 0)
             self.assertIsInstance(cuda_dev["memory_gb"], float)

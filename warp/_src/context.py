@@ -16202,7 +16202,7 @@ def print_diagnostics() -> dict:
             {
                 "alias": cuda_device.alias,
                 "name": cuda_device.name,
-                "arch": f"sm_{cuda_device.arch}",
+                "arch": cuda_device.arch_str or f"sm_{cuda_device.arch}",
                 "sm_count": cuda_device.sm_count,
                 "memory_gb": round(cuda_device.total_memory / (1024**3), 1),
                 "mempool_enabled": cuda_device.is_mempool_enabled if cuda_device.is_mempool_supported else False,
