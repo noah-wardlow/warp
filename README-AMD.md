@@ -4,20 +4,20 @@ This branch ports Warp 1.18 to AMD HIP/ROCm and tracks NVIDIA Warp `main`.
 The implementation is developed and measured on the Radeon 8060S
 (`gfx1151`) in a Framework Desktop.
 
-> **Validation status:** the current branch builds for `gfx1151`, initializes
-> as ROCm/HIP, and passes the current compiler/diagnostics regression. Broad
-> GPU correctness and performance passed on the immediately preceding
-> integrated port. The final current-commit GPU suites are pending a host
-> reboot after the ROCm runtime stopped completing raw `hipStreamCreate` calls.
-> See [KNOWN_ISSUES-AMD.md](KNOWN_ISSUES-AMD.md) for the exact scope; do not
-> interpret this status as a completed full-suite claim.
+> **Validation status:** implementation commit
+> `58146889520006b5e56cad1b08f1c4fe22bb2eea` has a clean native gfx1151
+> build and a complete 7,354-test GPU pass. Matching MuJoCo Warp implementation
+> commit `ab9d3d121ae8d8d6de3b7efd0d2de563cea6eeb9` also passes its complete
+> GPU suite against that binary. Later documentation-only commits do not change
+> the tested implementation. See [KNOWN_ISSUES-AMD.md](KNOWN_ISSUES-AMD.md)
+> for explicit capability gaps and unvalidated surfaces.
 
 ## Supported target
 
 | Item | Validated configuration |
 | --- | --- |
 | GPU | AMD Radeon 8060S, `gfx1151`, 40 compute units, wave32 |
-| Host | Framework Desktop, Ubuntu 26.04, kernel 7.0.0-29 |
+| Host | Framework Desktop, Ubuntu 26.04, kernel 7.0.0-30 |
 | Runtime | ROCm 7.2.2 (`HIP 7.2.53211`) |
 | Container | `rocm/pytorch:rocm7.2.2_ubuntu24.04_py3.12_pytorch_release_2.10.0` |
 | Python | 3.12 |
@@ -160,38 +160,42 @@ is disabled for device compilation. A combined HIP compile prints one benign
 host-side warning because the x86 compiler ignores that AMDGPU-only feature;
 the gfx1151 device compilation accepts it.
 
+HIP device-side half conversion uses an explicit `v_cvt_f16_f32` /
+`v_cvt_f32_f16` barrier. Without that barrier, the optimizing compiler can
+fold adjacent float-to-half and half-to-float operations and silently remove
+the half-precision rounding point. The regression checks the rounded result;
+the upstream matrix-inverse tolerance remains unchanged.
+
 ## Measured validation
 
 All counts below describe completed commands. Skips are retained as skips.
 
 | Surface | Result | Scope |
 | --- | ---: | --- |
-| Current Warp 1.18 clean native build | pass | HIP runtime, HIPRTC, LLVM, cuBQL, `gfx1151` |
-| Current compiler and diagnostics | 15 passed | Merged HIP include resolution and diagnostic structure |
-| Current default suite, GPU hidden | 3,166 passed, 547 skipped | 3,713 tests, two workers, 0 failures/errors; CPU and availability surfaces only |
-| Streams/events | 22 passed, 3 skipped | Preceding integrated port |
-| Stable capture allocations | 5 passed | Sparse, APIC, and FEM regressions on preceding integrated port |
-| Low precision/capabilities | 223 passed, 5 skipped | Preceding integrated port |
-| BF16 interop/tile set | 8 passed | Preceding integrated port |
-| Textures | 129 passed, 6 skipped | Preceding integrated port; skips require native mipmaps |
-| cuBQL geometry | 74 passed, 18 skipped | Preceding integrated port; skips require `usd-core` |
-| cuBQL fresh-process reliability | 20 × 3 passed | Preceding integrated port |
-| MuJoCo Warp renderer/BVH | 54 passed, 4 skipped | Preceding integrated port |
+| Warp 1.18 clean native build | pass | Exact `58146889`; release HIP runtime, HIPRTC, LLVM, cuBQL, `gfx1151` |
+| Warp default GPU suite | 7,104 passed, 250 skipped | 7,354 tests, serial, 0 failures/errors in 8,744.773 s |
+| Exact-binary focused gates | pass | gfx1151 smoke; 1 FP16 inverse; 8 FP16; 5 tile diagnostics; 1,213 async |
+| Async fresh-process reliability | 7 × 1,213 passed | Six pre-commit audit runs plus one exact rebuilt-binary run; no quarantine remains |
+| Current default suite, GPU hidden | 3,166 passed, 547 skipped | 3,713 tests, 0 failures/errors; CPU and availability surfaces |
+| MuJoCo Warp full GPU suite | 1,324 passed, 37 skipped | 1,361 cases plus 8 passed subtests, serial, 0 failures/errors in 560.26 s |
+| MuJoCo Warp warning contract | 7 passed | Two backend-notice variants and five MULTICCD warning cases |
 
 Representative completed performance measurements on the same Radeon 8060S:
 
-- MuJoCo humanoid, 8,192 worlds × 100 steps: median **454,039
-  world-steps/s** across five runs; all worlds converged.
+- MuJoCo humanoid, 8,192 worlds × 100 steps: median **451,360
+  world-steps/s** across five fresh processes (450,416–452,443); all worlds
+  converged.
+- Batched primitives renderer, 1,024 worlds at 64×64 RGB+depth: median
+  **91,646 world-frames/s** across five fresh processes (91,486–92,009); all
+  worlds converged.
 - Random 1,000,000-AABB build: median **0.2084 s** with HIP cuBQL versus
   **0.4780 s** with CPU SAH. LBVH built in **0.01385 s** but produced lower
-  end-to-end renderer throughput for the measured scene.
-- Batched primitives renderer, 1,024 worlds at 64×64 RGB+depth:
-  **111,988 world-frames/s** with the cuBQL/default path versus **76,256**
-  with LBVH.
+  end-to-end renderer throughput in the earlier controlled builder comparison.
 
 These measurements characterize this port; they are not a cross-vendor
-comparison. They must be repeated on the final current commits after the host
-runtime reset.
+comparison. The humanoid and renderer figures above were repeated on exact
+commits `58146889` and `ab9d3d1`; the standalone builder comparison predates
+those final implementation commits and is retained as design evidence.
 
 ## Validation commands
 
@@ -204,12 +208,14 @@ uv run python -m unittest \
   warp.tests.test_diagnostics
 ```
 
-Use conservative process concurrency on an integrated GPU:
+Run the gfx1151 suite serially. Multiple Python workers can contend in the
+ROCm/HSA runtime on this integrated GPU and obscure whether a failure belongs
+to Warp or to process-level device contention:
 
 ```bash
-uv run --extra dev -m warp.tests \
+uv run --extra dev python -m warp.tests \
   -s default \
-  -m 2 \
+  --serial-fallback \
   --junit-report-xml warp-rocm-gfx1151.xml
 ```
 
@@ -229,7 +235,7 @@ cd mujoco_warp-rocm
 
 uv sync --extra dev
 uv pip install --no-deps --editable ../warp-rocm
-uv run --no-sync pytest -n 2
+uv run --no-sync pytest
 ```
 
 MuJoCo Warp automatically disables only unavailable conditional graph nodes.

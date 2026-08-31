@@ -4,22 +4,31 @@ This file describes the live `noah/gfx1151-rocm-port` branch only. Historical
 results for older Warp, Newton, ROCm, and machine configurations remain in Git
 history; they are not current compatibility claims.
 
-Last audited: 2026-08-29.
+Last audited: 2026-08-30.
 
 ## Current validation gate
 
-The current Warp 1.18 branch builds and passes its compiler/diagnostic checks,
-but the complete current-commit GPU suites have not finished.
+The implementation gate is complete on the Framework Desktop:
 
-With the GPU hidden, the current default suite completed 3,713 tests in two
-workers: 3,166 passed, 547 skipped, and none failed or errored. This validates
-CPU and backend-neutral behavior; it does not lift the GPU validation gate.
+- Warp `58146889520006b5e56cad1b08f1c4fe22bb2eea` built from a clean worktree
+  and passed 7,354 default-suite tests: 7,104 passed, 250 skipped, no failures
+  or errors.
+- MuJoCo Warp `ab9d3d121ae8d8d6de3b7efd0d2de563cea6eeb9` passed 1,324 tests and
+  8 subtests against that exact Warp binary, with 37 skips and no failures or
+  errors.
+- Five-repeat medians were 451,360 world-steps/s for the 8,192-world humanoid
+  and 91,646 world-frames/s for the 1,024-world 64×64 RGB+depth renderer.
+- Raw HIP stream creation passed after the full Warp suite, the full MuJoCo
+  Warp suite, and both benchmark sets on boot
+  `89b924d9-5f7e-40a7-9fa5-8aa14ffb9643`.
 
-After an interrupted eight-worker Warp suite, the host ROCm 7.2.2 runtime
-entered a state where `hipStreamCreate` blocks in a fresh process. The same
-call blocks through `libamdhip64.so` without importing Warp, while `rocminfo`
-and PyTorch default-stream allocation remain responsive. This is therefore a
-host runtime/stream-state blocker, not evidence of a Warp initialization bug.
+An earlier interrupted eight-worker Warp attempt did leave ROCm 7.2.2 unable
+to complete `hipStreamCreate` in a fresh process. A host reboot cleared that
+runtime state. Serial validation then remained stable for the complete gate;
+multiple GPU-owning Python workers are therefore not the validated gfx1151
+test configuration.
+
+### Runtime health check
 
 Check the raw operation before starting another suite:
 
@@ -38,9 +47,6 @@ PY
 Expected output includes `hipStreamCreate:done` with status `0`. A timeout
 requires a host reboot before graph, stream, or MuJoCo Warp results are valid.
 Repeated test containers do not reset kernel/runtime state.
-
-The current boot was not rebooted automatically because rebooting is an
-administrative action and was not authorized.
 
 ## Platform capability gaps
 
@@ -95,16 +101,17 @@ the exact CUDA allocation-node topology are not evidence for this HIP path.
 - Deterministic GPU-to-GPU and run-to-run atomic modes are not validated on
   HIP and remain scoped away from the default HIP suite.
 
-## Numerical difference
+## Half-precision conversion semantics
 
-One strict `float16` matrix inverse test produced `-31.375` on gfx1151 versus
-the expected `-31.3125`: absolute difference `0.0625`, about `0.2%` and four
-half-precision ULPs at that magnitude. The upstream tolerance is `0.05`.
+An earlier strict `float16` matrix-inverse run exposed a missing rounding point:
+gfx1151 produced `-31.375` where the half-rounded path produces `-31.3125`.
+ROCm's optimizer had folded adjacent float-to-half and half-to-float operations,
+so disabling true16 registers alone was insufficient.
 
-The port does not widen that assertion. The broader aggregate ran 555 tests
-with this one failure and six skips; a separate BF16 interop/tile set passed
-8/8. Final classification requires rerunning the exact current commit after
-the host reset.
+HIP device builds now place an explicit AMDGPU `v_cvt_f16_f32` /
+`v_cvt_f32_f16` conversion barrier at the half-storage seam. A dedicated
+arithmetic-rounding regression and the original matrix-inverse assertion pass.
+The upstream `0.05` tolerance was not widened.
 
 ## Memory behavior
 
@@ -123,11 +130,19 @@ Captured workloads in sparse, APIC, FEM, and MuJoCo Warp need stable addresses.
 The HIP adapter pauses capture on its origin stream, makes an ordinary
 allocation, resumes capture, and releases the address only after graph/user
 ownership ends. Five targeted graph allocation regressions passed on the
-preceding integrated port.
+preceding integrated port, and the exact final Warp and MuJoCo Warp suites add
+broad graph/capture coverage without a related failure.
 
 Forked-stream allocations retain the pooled capture path because ending an
-origin capture from a forked stream is invalid. Multi-stream coverage must be
-rerun on the final commit.
+origin capture from a forked stream is invalid.
+
+### Async copy quarantine removed
+
+The earlier branch skipped one HIP async-copy permutation after an apparent
+serial-run failure. That quarantine was removed after six complete fresh-
+process executions of all 1,213 async tests passed, including the case after
+1,143 predecessors. The exact rebuilt binary then passed all 1,213 again, and
+the complete default suite passed. No HIP async-copy quarantine remains.
 
 ### UMA managed memory
 
@@ -145,9 +160,9 @@ producer stream and performs a conservative synchronization before a dependent
 external wait. This is stronger ordering than CUDA but localizes correctness at
 the graph/event seam.
 
-The integrated stream regression ran 25 tests: 22 passed and three skipped for
-hardware/capability requirements. It must be repeated on the current commit
-after reboot.
+The focused stream regression ran 25 tests: 22 passed and three skipped for
+hardware/capability requirements. The exact final default suite subsequently
+passed its complete stream and graph coverage.
 
 ## Compiler behavior
 
@@ -179,7 +194,7 @@ set the threshold to `0` only when diagnosing the AOT path.
 ## cuBQL and rendering
 
 The current branch ports the bundled cuBQL builder and traversal templates to
-HIP/hipCUB-compatible primitives. Completed evidence on the integrated port:
+HIP/hipCUB-compatible primitives. Completed targeted evidence includes:
 
 - 74 runnable geometry tests passed; 18 `usd-core` cases skipped;
 - 20 fresh processes each passed the three-test BVH query regression;
@@ -188,12 +203,12 @@ HIP/hipCUB-compatible primitives. Completed evidence on the integrated port:
 - one-million-AABB cuBQL construction measured 0.201-0.216 s versus
   0.465-0.491 s for CPU SAH.
 
-LBVH remains the fastest builder in isolation, but the measured 1,024-world
-renderer reached 111,988 world-frames/s with the cuBQL/default path versus
-76,256 with LBVH. MuJoCo Warp therefore chooses cuBQL when
-`warp.is_cubql_available()` is true and SAH otherwise.
-
-These results require final-commit repetition after the host runtime reset.
+LBVH remains the fastest builder in isolation, but the earlier controlled
+1,024-world comparison favored the cuBQL/default path end to end. MuJoCo Warp
+therefore chooses cuBQL when `warp.is_cubql_available()` is true and SAH
+otherwise. On the final exact commits, the complete MuJoCo Warp GPU suite
+passed and the default renderer produced a five-run median of 91,646
+world-frames/s.
 
 ## Reporting a new failure
 
